@@ -70,11 +70,19 @@ app.post("/api/upload", bearerAuth, async (c) => {
 
 /**
  * `POST /api/upload-batch` — body: { days: [{ date: "YYYY-MM-DD", payload: <object> }] }
- * 過去 N 日分を 1 リクエストで投入する。各 day を hc/{yyyy}/{mm-dd}.json に分割保存。
- * date が不正 / payload が object でない要素は skip され、書き込み件数のみ counts に返す。
- * 全 day が不正なら 400 を返す (= partial-only でも 200 を返さないと client が判断できない)。
+ *
+ * Default は **incremental backfill**: R2 に同 key が既に存在する day は skip し、
+ * 未存在の day だけ R2.put する。client が毎日 30-day batch を投げても R2 書込量は
+ * 増えない (Refs ippoan/HealthConnectReaderWorker#7)。
+ *
+ * `?force=true` を付けると旧来通り全部 overwrite (full backfill)。
+ *
+ * date が不正 / payload が object でない要素は skipped[] に積み、`written` 0 + 全要素
+ * 無効なら 400。skip 理由は `invalid_date` / `payload_not_object` / `not_object` /
+ * `date_not_string` / `already_exists` (新規)。
  */
 app.post("/api/upload-batch", bearerAuth, async (c) => {
+  const force = c.req.query("force") === "true";
   let body: unknown;
   try {
     body = await c.req.json();
@@ -92,9 +100,11 @@ app.post("/api/upload-batch", bearerAuth, async (c) => {
   if (days.length === 0 || days.length > 366) {
     return c.json({ error: "days_length_out_of_range" }, 400);
   }
-  const writes: Array<Promise<void>> = [];
-  const keys: string[] = [];
-  const skipped: Array<{ index: number; reason: string }> = [];
+
+  // Phase 1: validate / build write plan (without hitting R2 yet)
+  type Plan = { index: number; key: string; body: string };
+  const plan: Plan[] = [];
+  const skipped: Array<{ index: number; reason: string; key?: string }> = [];
   for (let i = 0; i < days.length; i++) {
     const d = days[i];
     if (d === null || typeof d !== "object") {
@@ -116,19 +126,44 @@ app.post("/api/upload-batch", bearerAuth, async (c) => {
       skipped.push({ index: i, reason: "payload_not_object" });
       continue;
     }
-    const body = JSON.stringify(payload);
-    writes.push(
-      c.env.R2.put(k.key, body, {
-        httpMetadata: { contentType: "application/json" },
-      }).then(() => undefined),
-    );
-    keys.push(k.key);
+    plan.push({ index: i, key: k.key, body: JSON.stringify(payload) });
   }
-  if (writes.length === 0) {
+
+  // Phase 2: in incremental mode (= !force), drop entries whose key already
+  // exists in R2. We `head()` in parallel; non-existent returns null.
+  if (!force && plan.length > 0) {
+    const heads = await Promise.all(plan.map((p) => c.env.R2.head(p.key)));
+    const filtered: Plan[] = [];
+    for (let i = 0; i < plan.length; i++) {
+      if (heads[i] === null) {
+        filtered.push(plan[i]);
+      } else {
+        skipped.push({ index: plan[i].index, reason: "already_exists", key: plan[i].key });
+      }
+    }
+    plan.length = 0;
+    plan.push(...filtered);
+  }
+
+  // Phase 3: write the remaining plan. We treat "0 to write" as success when
+  // there were valid days (= all already existed) and 400 only when nothing
+  // could be parsed in the first place.
+  const anyValidInput = plan.length + skipped.filter(
+    (s) => s.reason === "already_exists",
+  ).length > 0;
+  if (!anyValidInput) {
     return c.json({ error: "no_valid_days", skipped }, 400);
   }
-  await Promise.all(writes);
-  return c.json({ ok: true, written: writes.length, keys, skipped });
+
+  const keys = plan.map((p) => p.key);
+  await Promise.all(
+    plan.map((p) =>
+      c.env.R2.put(p.key, p.body, {
+        httpMetadata: { contentType: "application/json" },
+      }),
+    ),
+  );
+  return c.json({ ok: true, written: plan.length, keys, skipped, force });
 });
 
 /**
