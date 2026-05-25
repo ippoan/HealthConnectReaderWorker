@@ -1,0 +1,28 @@
+name: branch-protection
+
+# ci-workflows の reusable `branch-protection.yml` を caller として呼ぶ。
+# `push: main` のたびに main の protection を declarative に上書きする。
+#
+# 要 secret: `TAG_RELEASE_PAT` (fine-grained PAT で対象 repo の
+# "Administration: write" + "Contents: read" 権限を持つもの)。
+# `GITHUB_TOKEN` の `administration` scope は存在しないため代用不可。
+# 詳細は ci-workflows/branch-protection.yml の header コメント参照。
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    uses: ippoan/ci-workflows/.github/workflows/branch-protection.yml@main
+    secrets:
+      TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
+    with:
+      branch: main
+      required_checks: |
+        ci / Type Check
+        ci / Vitest + Coverage
+        ci / PR Limit Check
