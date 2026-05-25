@@ -14,6 +14,7 @@ export interface Env {
   WORKER_ENV: string;
   UPLOAD_TOKEN: SecretsStoreBinding | string;
   R2: R2Bucket;
+  DB: D1Database;
 }
 
 export async function readUploadToken(env: Env): Promise<string> {

@@ -29,6 +29,9 @@ jobs:
       typecheck_command: 'npx tsc --noEmit'
       has_tests: true
       # single-env: staging deploy と release deploy は同じ root config を叩く。
+      # D1 schema 適用は **Worker 自身の `POST /_admin/migrate`** に任せる
+      # (CI token に D1:Edit を足さなくて済むため。Refs #11)。
+      # deploy 後に 1 回叩く運用 (README 参照)。
       deploy_staging_script: 'npx wrangler deploy'
       deploy_release_script: 'npx wrangler deploy'
     secrets: inherit

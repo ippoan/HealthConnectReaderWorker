@@ -36,6 +36,60 @@ export const SERVICE_WORKER_JS = `self.addEventListener("install", () => self.sk
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 `;
 
+// favicon.ico — ブラウザが自動で要求するので 404 を出さないために最小 ICO を返す。
+// 16x16, 32bpp, 単色 #059669 (emerald-600) 塗りつぶし。手書きでバイト列を組む。
+function buildSolidFavicon(): Uint8Array {
+  const W = 16, H = 16;
+  // ICONDIR (6 bytes) + ICONDIRENTRY (16 bytes) + BITMAPINFOHEADER (40) +
+  // pixel data (W*H*4 BGRA) + AND mask (W*H/8 bytes)
+  const pixelBytes = W * H * 4;
+  const andBytes = (W * H) / 8;
+  const imageSize = 40 + pixelBytes + andBytes;
+  const total = 6 + 16 + imageSize;
+  const buf = new Uint8Array(total);
+  const dv = new DataView(buf.buffer);
+  // ICONDIR
+  dv.setUint16(0, 0, true);  // reserved
+  dv.setUint16(2, 1, true);  // type = icon
+  dv.setUint16(4, 1, true);  // count
+  // ICONDIRENTRY
+  buf[6] = W;
+  buf[7] = H;
+  buf[8] = 0;                // palette
+  buf[9] = 0;                // reserved
+  dv.setUint16(10, 1, true); // planes
+  dv.setUint16(12, 32, true);// bpp
+  dv.setUint32(14, imageSize, true);
+  dv.setUint32(18, 22, true);// offset (ICONDIR(6) + ENTRY(16))
+  // BITMAPINFOHEADER (40 bytes) at offset 22
+  let o = 22;
+  dv.setUint32(o, 40, true); o += 4;
+  dv.setInt32(o, W, true); o += 4;
+  dv.setInt32(o, H * 2, true); o += 4; // height = h*2 (XOR + AND)
+  dv.setUint16(o, 1, true); o += 2;
+  dv.setUint16(o, 32, true); o += 2;
+  dv.setUint32(o, 0, true); o += 4; // BI_RGB
+  dv.setUint32(o, pixelBytes, true); o += 4;
+  dv.setUint32(o, 0, true); o += 4;
+  dv.setUint32(o, 0, true); o += 4;
+  dv.setUint32(o, 0, true); o += 4;
+  dv.setUint32(o, 0, true); o += 4;
+  // pixel data BGRA, bottom-up
+  // #059669 = R 5, G 150, B 105
+  const R = 5, G = 150, B = 105, A = 255;
+  for (let i = 0; i < W * H; i++) {
+    buf[o + i * 4 + 0] = B;
+    buf[o + i * 4 + 1] = G;
+    buf[o + i * 4 + 2] = R;
+    buf[o + i * 4 + 3] = A;
+  }
+  o += pixelBytes;
+  // AND mask = all 0 (= fully opaque), already zero-filled
+  return buf;
+}
+
+export const FAVICON_ICO_BYTES = buildSolidFavicon();
+
 export const INDEX_HTML = `<!doctype html>
 <html lang="ja">
 <head>
@@ -43,6 +97,8 @@ export const INDEX_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Health Connect Reader</title>
 <link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="HC Reader" />
@@ -133,6 +189,7 @@ function getZonesToken() {
 
 async function refreshHistory() {
   const token = getZonesToken();
+  if (!token) { $("history").textContent = "token 未入力"; return; }
   const r = await fetch("/api/history", { headers: { Authorization: "Bearer " + token } });
   if (!r.ok) { $("history").textContent = "history fetch failed (" + r.status + ")"; return; }
   const j = await r.json();
@@ -280,6 +337,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (saved) $("zones-token").value = saved;
   } catch {}
   $("zones-upload-btn").addEventListener("click", uploadZones);
+  // token を入れたら即 localStorage 保存 + 両履歴を再 fetch (= 401 を消す)
+  $("zones-token").addEventListener("change", () => {
+    getZonesToken();
+    refreshHistory().catch(() => {});
+    refreshZonesList().catch(() => {});
+  });
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});
 });

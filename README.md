@@ -16,9 +16,55 @@ Refs ippoan/HealthConnectReader#6
 | GET    | `/health`            | none              | liveness probe                                             |
 | POST   | `/api/upload`        | `Bearer ${TOKEN}` | request body の JSON を R2 に PUT (`hc/yyyy/mm-dd.json`)   |
 | POST   | `/api/upload-batch`  | `Bearer ${TOKEN}` | `{days:[{date,payload}]}` を 1 リクエストで N 日分投入     |
-| POST   | `/api/upload-zones`  | `Bearer ${TOKEN}` | iOS Zones (Apple Watch) workout JSON 1 件を `zones/yyyy/mm-dd/{uuid}.json` に保存 |
+| POST   | `/api/upload-zones`  | `Bearer ${TOKEN}` | iOS Zones (Apple Watch) workout JSON 1 件を R2 (`zones/yyyy/mm-dd/{uuid}.json`) + D1 `workouts` に並列保存 |
 | GET    | `/api/history`       | `Bearer ${TOKEN}` | R2 `hc/` listing → `{ count, latest }` を返す              |
-| GET    | `/api/zones`         | `Bearer ${TOKEN}` | R2 `zones/` listing → `{ count, items: [{date, uuid, key, uploaded}] }` (新しい順) |
+| GET    | `/api/zones`         | `Bearer ${TOKEN}` | D1 `workouts` (source='zones') を `uploaded_at` desc で → `{ count, items: [{date, uuid, key, uploaded}] }` |
+| POST   | `/_admin/migrate`    | `Bearer ${TOKEN}` | `src/migrations.ts` の `SCHEMA_STATEMENTS` を D1 に idempotent 適用 |
+| GET    | `/favicon.ico`       | none              | 単色 16x16 ICO (404 抑止)                                  |
+
+### D1 schema 適用フロー
+
+`wrangler d1 migrations apply` は **使わない**。CI token に D1:Edit を足さずに済むよう、
+Worker 自身が DB binding 経由で schema を流す方式にしてある。
+
+```sh
+# deploy 後に 1 回だけ叩く (schema 無変更なら no-op で 200 が返る)
+curl -X POST https://hcreader.ippoan.org/_admin/migrate \
+  -H "Authorization: Bearer $UPLOAD_TOKEN"
+# → { "ok": true, "ran": 4, "statements": 4 }
+```
+
+schema 変更時は `src/migrations.ts` の `SCHEMA_STATEMENTS` 末尾に `ALTER TABLE` 等を
+追記して deploy → 上のコマンドを再実行する (すべて `IF NOT EXISTS` で書く)。
+
+### D1 `workouts` テーブル (突合用 metadata index)
+
+HC (Android Health Connect) と Zones (iOS Apple Watch) 双方の workout 要約を 1 テーブルで保持し、
+時刻 overlap での JOIN で「同じ workout の HC 距離 + Zones 心拍 zone」を 1 グラフ化する用途。
+生 JSON は引き続き R2 に保存 (`raw_key` がその pointer)。
+
+```
+workouts(
+  PRIMARY KEY (source, id),
+  source TEXT,          -- 'hc' | 'zones'
+  date TEXT,            -- YYYY-MM-DD (UTC)
+  start_at, end_at,     -- ISO 8601 UTC
+  activity_name,
+  distance_m, duration_sec, active_calories,
+  steps, avg_heart_rate,
+  raw_key, uploaded_at
+)
+```
+
+突合クエリ例 (Phase 3 で endpoint 化予定):
+
+```sql
+-- 同日かつ時刻区間が overlap する HC と Zones を結合
+SELECT h.start_at, h.distance_m, z.avg_heart_rate
+FROM workouts h JOIN workouts z
+  ON h.source='hc' AND z.source='zones'
+ AND h.start_at < z.end_at AND z.start_at < h.end_at;
+```
 
 `${TOKEN}` は CF Secrets Store の `hcreader-upload-token` (binding 名
 `UPLOAD_TOKEN`)。GCP Secret Manager にも同名で backup されており、
