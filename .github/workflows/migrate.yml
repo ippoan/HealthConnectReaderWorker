@@ -1,0 +1,44 @@
+name: D1 Migrate
+
+# CI (test.yml) が main で成功完了したら、Worker 内 `POST /_admin/migrate` を
+# 叩いて D1 schema を idempotent に適用する。
+#
+# 利点: CI token に D1:Edit を追加せずに済む (= deploy 用 Workers Scripts:Edit
+# token と、Worker bind の UPLOAD_TOKEN だけで schema 同期が完結する)。
+# Refs ippoan/HealthConnectReaderWorker#11
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+  # 手動 trigger も用意 (worker deploy 直後など、CI を待たず流したい時)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    # workflow_dispatch なら無条件、workflow_run の場合は親 CI が success の時のみ
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /_admin/migrate
+        env:
+          TOKEN: ${{ secrets.HCREADER_RELEASE_UPLOAD_TOKEN }}
+          URL: https://hcreader.ippoan.org/_admin/migrate
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::HCREADER_RELEASE_UPLOAD_TOKEN secret is not set"
+            exit 1
+          fi
+          # retry 3 で deploy 直後の cold start / 一時 5xx を吸収。
+          # -fsSL: HTTP error は exit code != 0、silent (token を log に echo しない)
+          response=$(curl -fsSL --retry 3 --retry-delay 5 \
+            -X POST "$URL" \
+            -H "Authorization: Bearer $TOKEN")
+          echo "$response"
+          # `{"ok":true,...}` が返らなければ fail (= schema 適用失敗)
+          echo "$response" | grep -q '"ok":true'
