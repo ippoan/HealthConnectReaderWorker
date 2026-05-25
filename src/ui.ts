@@ -21,6 +21,10 @@ export const INDEX_HTML = `<!doctype html>
       class="w-full bg-emerald-600 text-white font-semibold py-3 rounded-xl active:bg-emerald-700">
       今すぐ Upload
     </button>
+    <button id="upload-30-btn"
+      class="w-full bg-slate-700 text-white font-semibold py-3 rounded-xl active:bg-slate-800">
+      過去 30 日を Upload
+    </button>
     <label class="flex items-center justify-between text-sm">
       <span>1日1回 自動 Upload</span>
       <input id="auto-toggle" type="checkbox" class="h-5 w-9" />
@@ -68,9 +72,33 @@ async function uploadNow() {
   refreshHistory();
 }
 
+async function uploadPast30() {
+  if (!hasNative) { setStatus("native bridge 不在 (browser preview)"); return; }
+  if (typeof window.HC.readPastDays !== "function") {
+    setStatus("APK が古い (HC.readPastDays 未実装)"); return;
+  }
+  setStatus("過去 30 日読取中…");
+  let batch;
+  try { batch = window.HC.readPastDays(30); } catch (e) { setStatus("読取失敗: " + e); return; }
+  setStatus("送信中…");
+  const r = await fetch("/api/upload-batch", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + window.HC.getUploadToken(),
+    },
+    body: batch,
+  });
+  if (!r.ok) { setStatus("upload-batch 失敗: " + r.status); return; }
+  const j = await r.json();
+  setStatus("✓ " + j.written + " 日分 upload");
+  refreshHistory();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   $("env-badge").textContent = hasNative ? "native bridge: ✓" : "preview (no native)";
   $("upload-btn").addEventListener("click", uploadNow);
+  $("upload-30-btn").addEventListener("click", uploadPast30);
   $("auto-toggle").addEventListener("change", (e) => {
     if (!hasNative) return;
     if (e.target.checked) window.HC.scheduleDailyUpload();
