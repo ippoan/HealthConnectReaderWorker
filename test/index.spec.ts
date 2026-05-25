@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import app from "../src/index";
-import { summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
+import { listZones, summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
 
 const TOKEN = "test-upload-token";
 const auth = (t = TOKEN) => ({ Authorization: `Bearer ${t}` });
@@ -497,6 +497,83 @@ describe("POST /api/upload-zones", () => {
     const stored = JSON.parse(await obj!.text());
     expect(stored.distance.value).toBe(3.53);
     expect(stored.name).toBe("ランニング");
+  });
+});
+
+describe("GET /api/zones", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request("/api/zones", {}, env);
+    expect(r.status).toBe(401);
+  });
+
+  it("lists items uploaded via /api/upload-zones, newest first", async () => {
+    // 2 件続けて upload (時刻差を作るため間に await)
+    const first = {
+      uuid: "AAAAAAAA-1111-2222-3333-444444444444",
+      startDate: "2026-04-01T08:00:00Z",
+    };
+    const second = {
+      uuid: "BBBBBBBB-5555-6666-7777-888888888888",
+      startDate: "2026-04-02T09:00:00Z",
+    };
+    const r1 = await app.request(
+      "/api/upload-zones",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(first),
+      },
+      env,
+    );
+    expect(r1.status).toBe(200);
+    await new Promise((res) => setTimeout(res, 5));
+    const r2 = await app.request(
+      "/api/upload-zones",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(second),
+      },
+      env,
+    );
+    expect(r2.status).toBe(200);
+
+    // 形式違反 key も bucket に置いて無視されることを確認
+    await env.R2.put("zones/garbage.json", "{}");
+    await env.R2.put("zones/2026/04-03/not-a-uuid.json", "{}");
+
+    const r = await app.request("/api/zones", { headers: auth() }, env);
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as {
+      count: number;
+      items: Array<{ date: string; uuid: string; key: string; uploaded: string }>;
+    };
+    // 過去テストの R2 状態に依存しないよう、対象 uuid だけ filter して確認
+    const ours = j.items.filter(
+      (it) => it.uuid === first.uuid || it.uuid === second.uuid,
+    );
+    expect(ours.length).toBe(2);
+    // newest first: second の方が後に書かれたので先頭に来る
+    expect(ours[0].uuid).toBe(second.uuid);
+    expect(ours[0].date).toBe("2026-04-02");
+    expect(ours[0].key).toBe(
+      "zones/2026/04-02/BBBBBBBB-5555-6666-7777-888888888888.json",
+    );
+    expect(ours[1].uuid).toBe(first.uuid);
+    // uploaded は ISO 8601 文字列
+    expect(ours[0].uploaded).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // 異物 key は count にも items にも入らない (form 不一致は除外済)
+    expect(j.items.every((it) => /^zones\/\d{4}\/\d{2}-\d{2}\//.test(it.key))).toBe(true);
+  });
+});
+
+describe("listZones", () => {
+  it("returns empty on bucket with no zones objects", async () => {
+    const fakeBucket: R2Bucket = {
+      list: async () => ({ objects: [], truncated: false, delimitedPrefixes: [] }) as never,
+    } as unknown as R2Bucket;
+    const out = await listZones(fakeBucket);
+    expect(out).toEqual({ count: 0, items: [] });
   });
 });
 
