@@ -24,11 +24,32 @@ describe("GET /health", () => {
 });
 
 describe("GET /", () => {
-  it("returns HTML with the upload button", async () => {
+  it("302 to auth-worker login when no auth (PWA/browser first visit)", async () => {
     const r = await app.request("/", {}, env);
+    expect(r.status).toBe(302);
+    const loc = r.headers.get("location") ?? "";
+    expect(loc).toContain("auth.ippoan.org/oauth/google/redirect");
+    expect(loc).toContain("redirect_uri=");
+  });
+
+  it("200 with HTML when Bearer matches (Android WebView path)", async () => {
+    const r = await app.request(
+      "/",
+      { headers: { Authorization: `Bearer ${TOKEN}` } },
+      env,
+    );
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toMatch(/text\/html/);
     expect(await r.text()).toContain("今すぐ Upload");
+  });
+
+  it("302 when Bearer is wrong (= falls through to login redirect)", async () => {
+    const r = await app.request(
+      "/",
+      { headers: { Authorization: "Bearer nope" } },
+      env,
+    );
+    expect(r.status).toBe(302);
   });
 });
 
@@ -648,6 +669,97 @@ describe("zonesPayloadToRow", () => {
     expect(row.duration_sec).toBeNull();
     expect(row.steps).toBeNull();
     expect(row.activity_name).toBeNull();
+  });
+});
+
+describe("Auth: JWT cookie path", () => {
+  // HS256 sign helper (test only)
+  async function signJwt(payload: Record<string, unknown>, secret: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const body = btoa(JSON.stringify(payload))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const data = `${header}.${body}`;
+    const key = await crypto.subtle.importKey(
+      "raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+    );
+    const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(data));
+    const bytes = new Uint8Array(sig);
+    let s = "";
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    const sigB64 = btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return `${data}.${sigB64}`;
+  }
+
+  it("200 GET / with valid cookie + allowed email", async () => {
+    // vitest binding 経由で env.JWT_SECRET をセット (= production と同じ shape)
+    const secret = "test-jwt-secret";
+    const realEnv = { ...env, JWT_SECRET: secret };
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = await signJwt({ email: "m.tama.ramu@gmail.com", exp: future }, secret);
+    const r = await app.request(
+      "/",
+      { headers: { Cookie: `logi_auth_token=${jwt}` } },
+      realEnv,
+    );
+    expect(r.status).toBe(200);
+  });
+
+  it("302 GET / when cookie email is NOT in ALLOWED_EMAILS", async () => {
+    const secret = "test-jwt-secret";
+    const realEnv = { ...env, JWT_SECRET: secret };
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = await signJwt({ email: "intruder@example.com", exp: future }, secret);
+    const r = await app.request(
+      "/",
+      { headers: { Cookie: `logi_auth_token=${jwt}` } },
+      realEnv,
+    );
+    expect(r.status).toBe(302);
+  });
+
+  it("302 GET / when cookie is signed with wrong secret", async () => {
+    const realEnv = { ...env, JWT_SECRET: "real-secret" };
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = await signJwt({ email: "m.tama.ramu@gmail.com", exp: future }, "wrong-secret");
+    const r = await app.request(
+      "/",
+      { headers: { Cookie: `logi_auth_token=${jwt}` } },
+      realEnv,
+    );
+    expect(r.status).toBe(302);
+  });
+
+  it("302 GET / when cookie is expired", async () => {
+    const secret = "test-jwt-secret";
+    const realEnv = { ...env, JWT_SECRET: secret };
+    const past = Math.floor(Date.now() / 1000) - 3600;
+    const jwt = await signJwt({ email: "m.tama.ramu@gmail.com", exp: past }, secret);
+    const r = await app.request(
+      "/",
+      { headers: { Cookie: `logi_auth_token=${jwt}` } },
+      realEnv,
+    );
+    expect(r.status).toBe(302);
+  });
+
+  it("200 GET /api/zones with valid cookie (no Bearer needed)", async () => {
+    const secret = "test-jwt-secret";
+    const realEnv = { ...env, JWT_SECRET: secret };
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = await signJwt({ email: "m.tama.ramu@gmail.com", exp: future }, secret);
+    const r = await app.request(
+      "/api/zones",
+      { headers: { Cookie: `logi_auth_token=${jwt}` } },
+      realEnv,
+    );
+    expect(r.status).toBe(200);
+  });
+
+  it("401 GET /api/zones without cookie and without Bearer", async () => {
+    const r = await app.request("/api/zones", {}, env);
+    expect(r.status).toBe(401);
   });
 });
 

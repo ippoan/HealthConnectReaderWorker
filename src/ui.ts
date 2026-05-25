@@ -137,12 +137,6 @@ export const INDEX_HTML = `<!doctype html>
       Apple Watch の workout を Zones アプリで JSON export → ここで選択。
       iOS では「ファイル」アプリに保存してから選ぶか、ショートカット経由で直接送る。
     </p>
-    <label class="block text-sm">
-      Upload token (初回のみ入力 / localStorage 保存)
-      <input id="zones-token" type="password" autocomplete="off"
-        class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-        placeholder="UPLOAD_TOKEN" />
-    </label>
     <input id="zones-file" type="file" accept="application/json,.json"
       class="block w-full text-sm" />
     <button id="zones-upload-btn"
@@ -176,34 +170,28 @@ if ("serviceWorker" in navigator) {
 function setStatus(msg) { $("status").textContent = msg; }
 function setZonesStatus(msg) { $("zones-status").textContent = msg; }
 
-function getZonesToken() {
-  // native bridge があればそちらを優先、無ければ手入力 / localStorage
-  if (hasNative) return window.HC.getUploadToken();
-  const fromInput = $("zones-token").value.trim();
-  if (fromInput) {
-    try { localStorage.setItem("hcreader.upload-token", fromInput); } catch {}
-    return fromInput;
+// PWA は auth-worker JWT cookie で API が叩ける (= credentials: 'include')。
+// Android native は引き続き Bearer (HCBridge から token を取る)。
+function authHeaders() {
+  if (hasNative) {
+    return { Authorization: "Bearer " + window.HC.getUploadToken() };
   }
-  try { return localStorage.getItem("hcreader.upload-token") || ""; } catch { return ""; }
+  return {};
+}
+function authFetchInit(extra) {
+  return Object.assign({ credentials: "include", headers: Object.assign({}, authHeaders(), extra && extra.headers || {}) }, extra || {});
 }
 
 async function refreshHistory() {
-  const token = getZonesToken();
-  if (!token) { $("history").textContent = "token 未入力"; return; }
-  const r = await fetch("/api/history", { headers: { Authorization: "Bearer " + token } });
+  const r = await fetch("/api/history", authFetchInit());
   if (!r.ok) { $("history").textContent = "history fetch failed (" + r.status + ")"; return; }
   const j = await r.json();
   $("history").textContent = j.count + " 件 / 最新: " + (j.latest ?? "なし");
 }
 
 async function refreshZonesList() {
-  const token = getZonesToken();
   const list = $("zones-list");
-  if (!token) {
-    list.innerHTML = '<li class="py-1 text-slate-400">token 未入力</li>';
-    return;
-  }
-  const r = await fetch("/api/zones", { headers: { Authorization: "Bearer " + token } });
+  const r = await fetch("/api/zones", authFetchInit());
   if (!r.ok) {
     list.innerHTML = '<li class="py-1 text-rose-600">zones fetch failed (' + r.status + ")</li>";
     return;
@@ -234,14 +222,11 @@ async function uploadNow() {
   let payload;
   try { payload = window.HC.readToday(); } catch (e) { setStatus("読取失敗: " + e); return; }
   setStatus("送信中…");
-  const r = await fetch("/api/upload", {
+  const r = await fetch("/api/upload", authFetchInit({
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + window.HC.getUploadToken(),
-    },
+    headers: { "Content-Type": "application/json" },
     body: payload,
-  });
+  }));
   if (!r.ok) { setStatus("upload 失敗: " + r.status); return; }
   const j = await r.json();
   setStatus("✓ uploaded " + j.date);
@@ -268,14 +253,11 @@ async function uploadPast30() {
     return;
   }
   setStatus("送信中… (" + batch.length + " bytes)");
-  const r = await fetch("/api/upload-batch", {
+  const r = await fetch("/api/upload-batch", authFetchInit({
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + window.HC.getUploadToken(),
-    },
+    headers: { "Content-Type": "application/json" },
     body: batch,
-  });
+  }));
   if (!r.ok) {
     const errText = await r.text().catch(() => "");
     setStatus("upload-batch " + r.status + ": " + errText.slice(0, 200));
@@ -289,8 +271,6 @@ async function uploadPast30() {
 async function uploadZones() {
   const file = $("zones-file").files[0];
   if (!file) { setZonesStatus("ファイル未選択"); return; }
-  const token = getZonesToken();
-  if (!token) { setZonesStatus("Upload token を入力"); return; }
   setZonesStatus("読込中…");
   let text;
   try { text = await file.text(); } catch (e) { setZonesStatus("ファイル読込失敗: " + e); return; }
@@ -302,14 +282,11 @@ async function uploadZones() {
     return;
   }
   setZonesStatus("送信中…");
-  const r = await fetch("/api/upload-zones", {
+  const r = await fetch("/api/upload-zones", authFetchInit({
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + token,
-    },
+    headers: { "Content-Type": "application/json" },
     body: text,
-  });
+  }));
   if (!r.ok) {
     const errText = await r.text().catch(() => "");
     setZonesStatus("upload-zones " + r.status + ": " + errText.slice(0, 200));
@@ -331,18 +308,7 @@ document.addEventListener("DOMContentLoaded", () => {
     else window.HC.cancelDailyUpload();
   });
   if (hasNative) $("auto-toggle").checked = window.HC.isDailyUploadScheduled();
-  // 既存 token を input に復元 (UX: 毎回貼り直し不要)
-  try {
-    const saved = localStorage.getItem("hcreader.upload-token");
-    if (saved) $("zones-token").value = saved;
-  } catch {}
   $("zones-upload-btn").addEventListener("click", uploadZones);
-  // token を入れたら即 localStorage 保存 + 両履歴を再 fetch (= 401 を消す)
-  $("zones-token").addEventListener("change", () => {
-    getZonesToken();
-    refreshHistory().catch(() => {});
-    refreshZonesList().catch(() => {});
-  });
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});
 });

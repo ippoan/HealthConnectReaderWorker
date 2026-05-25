@@ -10,19 +10,44 @@ Refs ippoan/HealthConnectReader#6
 
 | Method | Path                 | Auth              | 役割                                                       |
 | ------ | -------------------- | ----------------- | ---------------------------------------------------------- |
-| GET    | `/`                  | none              | Tailwind ベースの WebView / PWA UI (Upload / 自動 / 履歴 / Zones) |
+| GET    | `/`                  | Bearer **or** auth-worker JWT cookie | Tailwind ベースの WebView / PWA UI (Upload / 自動 / 履歴 / Zones)。未認証は `auth.ippoan.org` に 302 |
 | GET    | `/manifest.json`     | none              | Web App Manifest (iOS Safari でホーム画面追加 → standalone PWA) |
 | GET    | `/sw.js`             | none              | 最小 Service Worker (PWA install 条件のスタブ)             |
 | GET    | `/health`            | none              | liveness probe                                             |
-| POST   | `/api/upload`        | `Bearer ${TOKEN}` | request body の JSON を R2 に PUT (`hc/yyyy/mm-dd.json`)   |
-| POST   | `/api/upload-batch`  | `Bearer ${TOKEN}` | `{days:[{date,payload}]}` を 1 リクエストで N 日分投入     |
-| POST   | `/api/upload-zones`  | `Bearer ${TOKEN}` | iOS Zones (Apple Watch) workout JSON 1 件を R2 (`zones/yyyy/mm-dd/{uuid}.json`) + D1 `workouts` に並列保存 |
-| GET    | `/api/history`       | `Bearer ${TOKEN}` | R2 `hc/` listing → `{ count, latest }` を返す              |
-| GET    | `/api/zones`         | `Bearer ${TOKEN}` | D1 `workouts` (source='zones') を `uploaded_at` desc で → `{ count, items: [{date, uuid, key, uploaded}] }` |
-| POST   | `/_admin/migrate`    | `Bearer ${TOKEN}` | `src/migrations.ts` の `SCHEMA_STATEMENTS` を D1 に idempotent 適用 |
+| POST   | `/api/upload`        | Bearer **or** cookie | request body の JSON を R2 に PUT (`hc/yyyy/mm-dd.json`)   |
+| POST   | `/api/upload-batch`  | Bearer **or** cookie | `{days:[{date,payload}]}` を 1 リクエストで N 日分投入     |
+| POST   | `/api/upload-zones`  | Bearer **or** cookie | iOS Zones (Apple Watch) workout JSON 1 件を R2 (`zones/yyyy/mm-dd/{uuid}.json`) + D1 `workouts` に並列保存 |
+| GET    | `/api/history`       | Bearer **or** cookie | R2 `hc/` listing → `{ count, latest }` を返す              |
+| GET    | `/api/zones`         | Bearer **or** cookie | D1 `workouts` (source='zones') を `uploaded_at` desc で → `{ count, items: [{date, uuid, key, uploaded}] }` |
+| POST   | `/_admin/migrate`    | Bearer **or** cookie | `src/migrations.ts` の `SCHEMA_STATEMENTS` を D1 に idempotent 適用 |
 | GET    | `/favicon.ico`       | none              | 単色 16x16 ICO (404 抑止)                                  |
 
-### D1 schema 適用フロー
+## 認証
+
+3 経路を受け付ける (`/`, `/api/*`, `/_admin/*` 共通):
+
+1. **`Authorization: Bearer ${UPLOAD_TOKEN}`** — Android WebView (header inject) / iOS ショートカット / CI / curl
+2. **auth-worker JWT cookie** (`logi_auth_token`, `Domain=.ippoan.org`) — PWA / ブラウザ
+   - cookie の `email` claim が `src/env.ts::ALLOWED_EMAILS` に含まれること
+   - JWT は `JWT_SECRET` (Workers secret、auth-worker と物理共有) で HS256 検証
+3. `/` のみ: どちらも無ければ `https://auth.ippoan.org/oauth/google/redirect?redirect_uri=https://hcreader.ippoan.org/` に 302
+   - auth-worker でログイン後、cookie が `.ippoan.org` で発行され自動で hcreader に乗る
+
+### 必要な user 操作 (1 回だけ)
+
+```sh
+# 1. JWT_SECRET を hcreader-worker に投入 (auth-worker と同じ値)
+npx wrangler secret put JWT_SECRET
+
+# 2. auth-worker KV `origins:prod` に hcreader を追加
+cd ../auth-worker
+CURRENT=$(npx wrangler kv:key get --binding=AUTH_CONFIG --remote "origins:prod")
+npx wrangler kv:key put --binding=AUTH_CONFIG --remote "origins:prod" "${CURRENT},https://hcreader.ippoan.org"
+```
+
+`JWT_SECRET` 未設定でも Bearer 認証は引き続き動く (= cookie 経路が無効化されるだけ)。
+
+## D1 schema 適用フロー
 
 `wrangler d1 migrations apply` は **使わない**。CI token に D1:Edit を足さずに済むよう、
 Worker 自身が DB binding 経由で schema を流す方式にしてある。
