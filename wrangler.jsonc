@@ -28,19 +28,19 @@
   // `hcreader-upload-token` を投入し、env var `UPLOAD_TOKEN` として
   // worker から参照する。値は GCP Secret Manager 側にも同名で backup
   // (secret-verify-gcp.yml で確認)。
+  //
+  // `secrets.required` は **わざと書かない**:
+  //   - wrangler 4.79+ は `secrets.required` を worker-scoped secret 宣言
+  //     と扱う。`secrets_store_secrets.binding` と同名にすると "required
+  //     secret not set" で deploy が落ちる (Refs ippoan/mcp-relay-rs#21)
+  //   - secret-verify-gcp.yml は `secrets_store_secrets[*].secret_name` を
+  //     自動抽出して GCP Secret Manager と突合してくれるので、`secrets.
+  //     required` を立てなくても verify は走る
   "secrets_store_secrets": [
     {
       "binding": "UPLOAD_TOKEN",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "hcreader-upload-token"
     }
-  ],
-  // ci-workflows/secret-verify-gcp.yml の入力。GCP Secret Manager 上に
-  // この名前の secret が存在するかを CI で verify する。CF Secrets Store
-  // の secret_name と完全に揃えて宣言する。
-  "secrets": {
-    "required": [
-      "hcreader-upload-token"
-    ]
-  }
+  ]
 }
