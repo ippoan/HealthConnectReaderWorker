@@ -17,9 +17,9 @@
  */
 import { Hono } from "hono";
 
-import { bearerAuth } from "./auth";
+import { apiAuth, verifyAuthCookie } from "./auth";
 import { listZonesFromDb, upsertWorkout, zonesPayloadToRow } from "./db";
-import type { AppEnv } from "./env";
+import { readUploadToken, type AppEnv } from "./env";
 import { applySchema } from "./migrations";
 import {
   summarizeHistory,
@@ -29,13 +29,55 @@ import {
 } from "./r2";
 import { FAVICON_ICO_BYTES, INDEX_HTML, MANIFEST_JSON, SERVICE_WORKER_JS } from "./ui";
 
+/**
+ * auth-worker (`auth.ippoan.org`) のログイン画面に飛ばす URL を組む。
+ * 戻り先は呼び元 URL の `${origin}/`、auth-worker が cookie を `.ippoan.org`
+ * で発行するのでそのまま hcreader.ippoan.org にも送られる。
+ */
+function buildAuthLoginUrl(requestUrl: string): string {
+  const u = new URL(requestUrl);
+  const back = `${u.origin}/`;
+  return `https://auth.ippoan.org/oauth/google/redirect?redirect_uri=${encodeURIComponent(back)}`;
+}
+
 const app = new Hono<AppEnv>();
 
 app.get("/health", (c) =>
   c.json({ ok: true, env: c.env.WORKER_ENV, version: "0.1.0" }),
 );
 
-app.get("/", (c) => c.html(INDEX_HTML));
+/**
+ * `GET /` — UI を返す。auth 3 経路:
+ *   (a) `Authorization: Bearer <UPLOAD_TOKEN>` 一致 → UI (Android WebView)
+ *   (b) auth-worker JWT cookie が valid + email ∈ ALLOWED_EMAILS → UI (PWA/ブラウザ)
+ *   (c) どちらも無し → auth-worker login へ 302 redirect
+ *
+ * Refs ippoan/HealthConnectReaderWorker#15
+ */
+app.get("/", async (c) => {
+  // (a) Bearer
+  const expected = await readUploadToken(c.env);
+  if (expected) {
+    const header = c.req.header("authorization") ?? "";
+    const m = /^Bearer\s+(.+)$/i.exec(header);
+    if (m && constantTimeEqualStr(m[1], expected)) {
+      return c.html(INDEX_HTML);
+    }
+  }
+  // (b) JWT cookie
+  if (await verifyAuthCookie(c.env, c.req.header("cookie") ?? "")) {
+    return c.html(INDEX_HTML);
+  }
+  // (c) login redirect
+  return c.redirect(buildAuthLoginUrl(c.req.url), 302);
+});
+
+function constantTimeEqualStr(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
 
 app.get("/manifest.json", () =>
   new Response(MANIFEST_JSON, {
@@ -62,7 +104,7 @@ app.get("/favicon.ico", () =>
   }),
 );
 
-app.post("/api/upload", bearerAuth, async (c) => {
+app.post("/api/upload", apiAuth, async (c) => {
   const raw = await c.req.raw.arrayBuffer();
   if (raw.byteLength === 0) return c.json({ error: "empty_body" }, 400);
   let parsed: unknown;
@@ -94,7 +136,7 @@ app.post("/api/upload", bearerAuth, async (c) => {
  * 無効なら 400。skip 理由は `invalid_date` / `payload_not_object` / `not_object` /
  * `date_not_string` / `already_exists` (新規)。
  */
-app.post("/api/upload-batch", bearerAuth, async (c) => {
+app.post("/api/upload-batch", apiAuth, async (c) => {
   const force = c.req.query("force") === "true";
   let body: unknown;
   try {
@@ -185,7 +227,7 @@ app.post("/api/upload-batch", bearerAuth, async (c) => {
  * R2 key は `zones/{yyyy}/{mm}-{dd}/{uuid}.json` (UTC `startDate` 由来)
  * uuid が重複したら overwrite (= 同一 workout の再 upload は idempotent)
  */
-app.post("/api/upload-zones", bearerAuth, async (c) => {
+app.post("/api/upload-zones", apiAuth, async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -229,7 +271,7 @@ app.post("/api/upload-zones", bearerAuth, async (c) => {
   });
 });
 
-app.get("/api/history", bearerAuth, async (c) => {
+app.get("/api/history", apiAuth, async (c) => {
   const summary = await summarizeHistory(c.env.R2);
   return c.json(summary);
 });
@@ -247,7 +289,7 @@ app.get("/api/history", bearerAuth, async (c) => {
  *   2. 1 回だけ `curl -X POST .../_admin/migrate -H "Authorization: Bearer $TOKEN"`
  *   3. schema 変更が無い回は 200 が返るだけ (no-op)
  */
-app.post("/_admin/migrate", bearerAuth, async (c) => {
+app.post("/_admin/migrate", apiAuth, async (c) => {
   const result = await applySchema(c.env.DB);
   return c.json({ ok: true, ...result });
 });
@@ -257,7 +299,7 @@ app.post("/_admin/migrate", bearerAuth, async (c) => {
  * D1 `workouts` テーブル (source='zones') から uploaded_at desc で取得。
  * shape は従来通り `{ count, items: [{date, uuid, key, uploaded}] }`。
  */
-app.get("/api/zones", bearerAuth, async (c) => {
+app.get("/api/zones", apiAuth, async (c) => {
   const items = await listZonesFromDb(c.env.DB);
   return c.json({ count: items.length, items });
 });
