@@ -1,19 +1,29 @@
 /**
  * healthconnectreader-worker — WebView UI + R2 backend for ippoan/HealthConnectReader.
  *
- *   GET  /                  → static HTML UI (Tailwind CDN)
+ *   GET  /                  → static HTML UI (Tailwind CDN) — PWA shell
+ *   GET  /manifest.json     → Web App Manifest (install 可能化)
+ *   GET  /sw.js             → minimal service worker (install 条件を満たすため)
  *   POST /api/upload        → Bearer → PUT R2 hc/{yyyy}/{mm-dd}.json (today)
  *   POST /api/upload-batch  → Bearer → split { days: [{date, payload}] } into N day files
+ *   POST /api/upload-zones  → Bearer → iOS Zones (Apple Watch) workout JSON 1 件を
+ *                              zones/{yyyy}/{mm}-{dd}/{uuid}.json に保存
  *   GET  /api/history       → Bearer → { count, latest }
  *
  * Refs ippoan/HealthConnectReader#6
+ * Refs ippoan/HealthConnectReaderWorker#9
  */
 import { Hono } from "hono";
 
 import { bearerAuth } from "./auth";
 import type { AppEnv } from "./env";
-import { summarizeHistory, uploadKeyFor, uploadKeyForDateString } from "./r2";
-import { INDEX_HTML } from "./ui";
+import {
+  summarizeHistory,
+  uploadKeyFor,
+  uploadKeyForDateString,
+  zonesKeyFor,
+} from "./r2";
+import { INDEX_HTML, MANIFEST_JSON, SERVICE_WORKER_JS } from "./ui";
 
 const app = new Hono<AppEnv>();
 
@@ -22,6 +32,22 @@ app.get("/health", (c) =>
 );
 
 app.get("/", (c) => c.html(INDEX_HTML));
+
+app.get("/manifest.json", () =>
+  new Response(MANIFEST_JSON, {
+    headers: { "content-type": "application/manifest+json; charset=utf-8" },
+  }),
+);
+
+app.get("/sw.js", () =>
+  new Response(SERVICE_WORKER_JS, {
+    headers: {
+      "content-type": "application/javascript; charset=utf-8",
+      // SW は常に最新を取りに行く: cache 効くと更新が刺さらない
+      "cache-control": "no-cache",
+    },
+  }),
+);
 
 app.post("/api/upload", bearerAuth, async (c) => {
   const raw = await c.req.raw.arrayBuffer();
@@ -103,6 +129,45 @@ app.post("/api/upload-batch", bearerAuth, async (c) => {
   }
   await Promise.all(writes);
   return c.json({ ok: true, written: writes.length, keys, skipped });
+});
+
+/**
+ * `POST /api/upload-zones` — iOS Zones (Apple Watch) workout export を 1 件保存。
+ * body: Zones JSON そのまま (top-level に `uuid` と `startDate` を含むこと)
+ * R2 key は `zones/{yyyy}/{mm}-{dd}/{uuid}.json` (UTC `startDate` 由来)
+ * uuid が重複したら overwrite (= 同一 workout の再 upload は idempotent)
+ */
+app.post("/api/upload-zones", bearerAuth, async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "expected_object" }, 400);
+  }
+  const uuid = (body as { uuid?: unknown }).uuid;
+  const startDate = (body as { startDate?: unknown }).startDate;
+  if (typeof uuid !== "string") {
+    return c.json({ error: "missing_uuid" }, 400);
+  }
+  if (typeof startDate !== "string") {
+    return c.json({ error: "missing_startDate" }, 400);
+  }
+  const k = zonesKeyFor(startDate, uuid);
+  if (!k) {
+    return c.json({ error: "invalid_uuid_or_startDate" }, 400);
+  }
+  await c.env.R2.put(k.key, JSON.stringify(body), {
+    httpMetadata: { contentType: "application/json" },
+  });
+  return c.json({
+    ok: true,
+    key: k.key,
+    date: `${k.yyyy}-${k.mmdd}`,
+    uuid,
+  });
 });
 
 app.get("/api/history", bearerAuth, async (c) => {

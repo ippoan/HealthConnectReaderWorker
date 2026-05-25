@@ -30,6 +30,26 @@ export function uploadKeyForDateString(date: string): UploadKey | null {
   return { yyyy, mmdd: `${mm}-${dd}`, key: `hc/${yyyy}/${mm}-${dd}.json` };
 }
 
+const ZONES_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+
+/**
+ * Zones (iOS Apple Watch workout export) JSON 1 件を `zones/{yyyy}/{mm}-{dd}/{uuid}.json`
+ * 配下に置く key を作る。`hc/` と違い 1 日複数 workout を保持するため uuid を file 名に。
+ * - `startDate` は ISO 8601 文字列。UTC で yyyy/mm-dd に分割する
+ * - `uuid` は Zones の workout uuid (`C79F6C0C-...` 形式)
+ * 不正な startDate / uuid は null。
+ */
+export function zonesKeyFor(startDate: string, uuid: string): UploadKey | null {
+  if (!ZONES_UUID.test(uuid)) return null;
+  const ts = Date.parse(startDate);
+  if (Number.isNaN(ts)) return null;
+  const d = new Date(ts);
+  const yyyy = String(d.getUTCFullYear()).padStart(4, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return { yyyy, mmdd: `${mm}-${dd}`, key: `zones/${yyyy}/${mm}-${dd}/${uuid}.json` };
+}
+
 export interface HistorySummary {
   count: number;
   latest: string | null;
