@@ -1,13 +1,15 @@
-import { applyD1Migrations, env } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import app from "../src/index";
 import { zonesPayloadToRow } from "../src/db";
+import { applySchema } from "../src/migrations";
 import { summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
 
-// D1 schema を test 起動時に 1 回適用 (migrations/*.sql から)
+// D1 schema は production と同じ `applySchema` で test DB にも適用する
+// (= production の `POST /_admin/migrate` と完全同じ経路)。
 beforeAll(async () => {
-  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  await applySchema(env.DB);
 });
 
 const TOKEN = "test-upload-token";
@@ -646,6 +648,49 @@ describe("zonesPayloadToRow", () => {
     expect(row.duration_sec).toBeNull();
     expect(row.steps).toBeNull();
     expect(row.activity_name).toBeNull();
+  });
+});
+
+describe("POST /_admin/migrate", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request(
+      "/_admin/migrate",
+      { method: "POST" },
+      env,
+    );
+    expect(r.status).toBe(401);
+  });
+
+  it("200 + idempotent (re-running does not throw, returns ran=statements)", async () => {
+    const r1 = await app.request(
+      "/_admin/migrate",
+      { method: "POST", headers: auth() },
+      env,
+    );
+    expect(r1.status).toBe(200);
+    const j1 = (await r1.json()) as { ok: boolean; ran: number; statements: number };
+    expect(j1.ok).toBe(true);
+    expect(j1.ran).toBe(j1.statements);
+    expect(j1.statements).toBeGreaterThan(0);
+
+    // re-run is safe (IF NOT EXISTS)
+    const r2 = await app.request(
+      "/_admin/migrate",
+      { method: "POST", headers: auth() },
+      env,
+    );
+    expect(r2.status).toBe(200);
+
+    // workouts テーブルが実在し、INSERT できる
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, raw_key, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind("smoke-1", "zones", "2026-01-01", "zones/2026/01-01/smoke-1.json", "2026-01-01T00:00:00Z")
+      .run();
+    const row = await env.DB.prepare(
+      "SELECT id FROM workouts WHERE id = 'smoke-1'",
+    ).first<{ id: string }>();
+    expect(row?.id).toBe("smoke-1");
   });
 });
 

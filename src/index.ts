@@ -10,6 +10,7 @@
  *                              zones/{yyyy}/{mm}-{dd}/{uuid}.json に保存
  *   GET  /api/history       → Bearer → { count, latest } (hc/ のみ)
  *   GET  /api/zones         → Bearer → { count, items[] } Zones アップロード履歴
+ *   POST /_admin/migrate    → Bearer → applySchema() で D1 schema を idempotent に適用
  *
  * Refs ippoan/HealthConnectReader#6
  * Refs ippoan/HealthConnectReaderWorker#9
@@ -19,6 +20,7 @@ import { Hono } from "hono";
 import { bearerAuth } from "./auth";
 import { listZonesFromDb, upsertWorkout, zonesPayloadToRow } from "./db";
 import type { AppEnv } from "./env";
+import { applySchema } from "./migrations";
 import {
   summarizeHistory,
   uploadKeyFor,
@@ -230,6 +232,24 @@ app.post("/api/upload-zones", bearerAuth, async (c) => {
 app.get("/api/history", bearerAuth, async (c) => {
   const summary = await summarizeHistory(c.env.R2);
   return c.json(summary);
+});
+
+/**
+ * `POST /_admin/migrate` — D1 schema を applySchema() で適用する。
+ *
+ * Worker 内から DB binding 経由で実行するので CF API token に D1:Edit 権限
+ * が不要 (= deploy 用 token のままで OK)。schema は `src/migrations.ts` の
+ * `SCHEMA_STATEMENTS` が source of truth、すべて `IF NOT EXISTS` なので
+ * 何度叩いても idempotent。
+ *
+ * 運用フロー (Refs ippoan/HealthConnectReaderWorker#11):
+ *   1. `wrangler deploy` で新 schema を持つコードを上げる
+ *   2. 1 回だけ `curl -X POST .../_admin/migrate -H "Authorization: Bearer $TOKEN"`
+ *   3. schema 変更が無い回は 200 が返るだけ (no-op)
+ */
+app.post("/_admin/migrate", bearerAuth, async (c) => {
+  const result = await applySchema(c.env.DB);
+  return c.json({ ok: true, ...result });
 });
 
 /**

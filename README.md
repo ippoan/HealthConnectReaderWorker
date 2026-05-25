@@ -19,7 +19,23 @@ Refs ippoan/HealthConnectReader#6
 | POST   | `/api/upload-zones`  | `Bearer ${TOKEN}` | iOS Zones (Apple Watch) workout JSON 1 件を R2 (`zones/yyyy/mm-dd/{uuid}.json`) + D1 `workouts` に並列保存 |
 | GET    | `/api/history`       | `Bearer ${TOKEN}` | R2 `hc/` listing → `{ count, latest }` を返す              |
 | GET    | `/api/zones`         | `Bearer ${TOKEN}` | D1 `workouts` (source='zones') を `uploaded_at` desc で → `{ count, items: [{date, uuid, key, uploaded}] }` |
+| POST   | `/_admin/migrate`    | `Bearer ${TOKEN}` | `src/migrations.ts` の `SCHEMA_STATEMENTS` を D1 に idempotent 適用 |
 | GET    | `/favicon.ico`       | none              | 単色 16x16 ICO (404 抑止)                                  |
+
+### D1 schema 適用フロー
+
+`wrangler d1 migrations apply` は **使わない**。CI token に D1:Edit を足さずに済むよう、
+Worker 自身が DB binding 経由で schema を流す方式にしてある。
+
+```sh
+# deploy 後に 1 回だけ叩く (schema 無変更なら no-op で 200 が返る)
+curl -X POST https://hcreader.ippoan.org/_admin/migrate \
+  -H "Authorization: Bearer $UPLOAD_TOKEN"
+# → { "ok": true, "ran": 4, "statements": 4 }
+```
+
+schema 変更時は `src/migrations.ts` の `SCHEMA_STATEMENTS` 末尾に `ALTER TABLE` 等を
+追記して deploy → 上のコマンドを再実行する (すべて `IF NOT EXISTS` で書く)。
 
 ### D1 `workouts` テーブル (突合用 metadata index)
 
