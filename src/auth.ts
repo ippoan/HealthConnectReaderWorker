@@ -1,8 +1,13 @@
 import type { Context, MiddlewareHandler } from "hono";
-import type { AppEnv } from "./env";
+import { readUploadToken, type AppEnv } from "./env";
 
 export const bearerAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const expected = c.env.UPLOAD_TOKEN;
+  // Secrets Store binding は **string ではなく `{ get(): Promise<string> }`
+  // object** (CF docs)。旧コードは `c.env.UPLOAD_TOKEN` を直接 string として
+  // 比較していたため、timingSafeEqual が "[object Object]" 相手の比較になり
+  // 常に false (401)。`readUploadToken` で binding / test 両 shape を吸収する。
+  // 値は 1 request の中だけで使い回し、log にも response にも echo しない。
+  const expected = await readUploadToken(c.env);
   if (!expected) return c.json({ error: "server_misconfigured" }, 500);
   const header = c.req.header("authorization") ?? "";
   const m = /^Bearer\s+(.+)$/i.exec(header);
