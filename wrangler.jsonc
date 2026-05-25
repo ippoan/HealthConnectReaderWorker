@@ -9,9 +9,15 @@
   },
   // secrets-inventory / ref-files-worker と同じく **single-env 運用**
   // (staging = prod)。CI からは PR merge / tag push どちらも root config の
-  // `npx wrangler deploy` を走らせる。workers.dev 公開のみで、custom domain
-  // が決まったら `routes` を生やす。Refs ippoan/HealthConnectReader#6
-  "workers_dev": true,
+  // `npx wrangler deploy` を走らせる。Refs ippoan/HealthConnectReader#6
+  //
+  // custom domain (`hcreader.ippoan.org`) を生やしたので workers.dev は
+  // off。custom_domain=true で wrangler が DNS record + route を自動生成
+  // (zone `ippoan.org` 必須、既に CF account に存在)。
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "hcreader.ippoan.org", "custom_domain": true }
+  ],
   "vars": {
     "WORKER_ENV": "prod"
   },
