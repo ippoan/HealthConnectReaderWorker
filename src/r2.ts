@@ -12,6 +12,24 @@ export function uploadKeyFor(date: Date): UploadKey {
   return { yyyy, mmdd, key: `hc/${yyyy}/${mmdd}.json` };
 }
 
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * `YYYY-MM-DD` 形式の date 文字列を `hc/{yyyy}/{mm-dd}.json` key に変換する。
+ * 不正な形式 (年/月/日 の範囲超過含む) は null。
+ */
+export function uploadKeyForDateString(date: string): UploadKey | null {
+  const m = ISO_DATE.exec(date);
+  if (!m) return null;
+  const yyyy = m[1];
+  const mm = m[2];
+  const dd = m[3];
+  const mmNum = Number(mm);
+  const ddNum = Number(dd);
+  if (mmNum < 1 || mmNum > 12 || ddNum < 1 || ddNum > 31) return null;
+  return { yyyy, mmdd: `${mm}-${dd}`, key: `hc/${yyyy}/${mm}-${dd}.json` };
+}
+
 export interface HistorySummary {
   count: number;
   latest: string | null;

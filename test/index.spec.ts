@@ -140,6 +140,98 @@ describe("uploadKeyFor", () => {
   });
 });
 
+describe("POST /api/upload-batch", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", body: "{}" },
+      env,
+    );
+    expect(r.status).toBe(401);
+  });
+
+  it("400 on invalid json", async () => {
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body: "x" },
+      env,
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("400 when days missing", async () => {
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body: "{}" },
+      env,
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("400 when all days invalid", async () => {
+    const body = JSON.stringify({
+      days: [
+        { date: "bad", payload: {} },
+        { date: "2026-13-01", payload: {} },
+      ],
+    });
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("400 when days length out of range", async () => {
+    const r = await app.request(
+      "/api/upload-batch",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify({ days: [] }),
+      },
+      env,
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("200 writes per-day keys + records skipped reasons", async () => {
+    const body = JSON.stringify({
+      days: [
+        { date: "2026-04-01", payload: { sessions: [] } },
+        { date: "2026-04-02", payload: { sessions: [{ x: 1 }] } },
+        { date: "not-a-date", payload: {} },           // skipped: invalid_date
+        { date: "2026-04-03", payload: "string" },     // skipped: payload_not_object
+        "not-an-object",                                // skipped: not_object
+      ],
+    });
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as {
+      ok: boolean;
+      written: number;
+      keys: string[];
+      skipped: Array<{ index: number; reason: string }>;
+    };
+    expect(j.ok).toBe(true);
+    expect(j.written).toBe(2);
+    expect(j.keys).toEqual(["hc/2026/04-01.json", "hc/2026/04-02.json"]);
+    expect(j.skipped.map((s) => s.reason)).toEqual([
+      "invalid_date",
+      "payload_not_object",
+      "not_object",
+    ]);
+    // verify actual R2 contents
+    const day2 = await env.R2.get("hc/2026/04-02.json");
+    expect(await day2!.text()).toBe('{"sessions":[{"x":1}]}');
+  });
+});
+
 describe("summarizeHistory", () => {
   it("returns { count: 0, latest: null } on empty bucket", async () => {
     // Use a fresh-ish view: list existing then drop is overkill — instead
