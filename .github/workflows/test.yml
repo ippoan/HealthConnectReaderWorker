@@ -29,6 +29,9 @@ jobs:
       typecheck_command: 'npx tsc --noEmit'
       has_tests: true
       # single-env: staging deploy と release deploy は同じ root config を叩く。
-      deploy_staging_script: 'npx wrangler deploy'
-      deploy_release_script: 'npx wrangler deploy'
+      # deploy 前に D1 migrations を remote に apply。`--remote` で本番 D1 を対象、
+      # CI=true 環境なので prompt は出ない (wrangler 4.x の動作)。schema が無変更
+      # なら no-op で抜ける。
+      deploy_staging_script: 'npx wrangler d1 migrations apply DB --remote && npx wrangler deploy'
+      deploy_release_script: 'npx wrangler d1 migrations apply DB --remote && npx wrangler deploy'
     secrets: inherit

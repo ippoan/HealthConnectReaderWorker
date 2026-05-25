@@ -17,15 +17,15 @@
 import { Hono } from "hono";
 
 import { bearerAuth } from "./auth";
+import { listZonesFromDb, upsertWorkout, zonesPayloadToRow } from "./db";
 import type { AppEnv } from "./env";
 import {
-  listZones,
   summarizeHistory,
   uploadKeyFor,
   uploadKeyForDateString,
   zonesKeyFor,
 } from "./r2";
-import { INDEX_HTML, MANIFEST_JSON, SERVICE_WORKER_JS } from "./ui";
+import { FAVICON_ICO_BYTES, INDEX_HTML, MANIFEST_JSON, SERVICE_WORKER_JS } from "./ui";
 
 const app = new Hono<AppEnv>();
 
@@ -47,6 +47,15 @@ app.get("/sw.js", () =>
       "content-type": "application/javascript; charset=utf-8",
       // SW は常に最新を取りに行く: cache 効くと更新が刺さらない
       "cache-control": "no-cache",
+    },
+  }),
+);
+
+app.get("/favicon.ico", () =>
+  new Response(FAVICON_ICO_BYTES, {
+    headers: {
+      "content-type": "image/x-icon",
+      "cache-control": "public, max-age=86400",
     },
   }),
 );
@@ -196,13 +205,24 @@ app.post("/api/upload-zones", bearerAuth, async (c) => {
   if (!k) {
     return c.json({ error: "invalid_uuid_or_startDate" }, 400);
   }
-  await c.env.R2.put(k.key, JSON.stringify(body), {
-    httpMetadata: { contentType: "application/json" },
-  });
+  const date = `${k.yyyy}-${k.mmdd}`;
+  const uploadedAt = new Date().toISOString();
+  // R2 への raw 保存と D1 への metadata upsert を並列実行。どちらかが失敗しても
+  // partial state を残しうるが、再 upload で再現可能 (upsert は idempotent) なので
+  // 個別 retry はしない。Throw は Hono の onError で 500 化される。
+  await Promise.all([
+    c.env.R2.put(k.key, JSON.stringify(body), {
+      httpMetadata: { contentType: "application/json" },
+    }),
+    upsertWorkout(
+      c.env.DB,
+      zonesPayloadToRow(body as Record<string, unknown>, k.key, date, uploadedAt),
+    ),
+  ]);
   return c.json({
     ok: true,
     key: k.key,
-    date: `${k.yyyy}-${k.mmdd}`,
+    date,
     uuid,
   });
 });
@@ -214,12 +234,12 @@ app.get("/api/history", bearerAuth, async (c) => {
 
 /**
  * `GET /api/zones` — Zones workout のアップロード履歴を返す。
- * R2 list だけで構築 (= 中身は読まない) し、形式不一致 key は無視する。
- * `uploaded` 降順で `{ count, items: [{date, uuid, key, uploaded}] }`。
+ * D1 `workouts` テーブル (source='zones') から uploaded_at desc で取得。
+ * shape は従来通り `{ count, items: [{date, uuid, key, uploaded}] }`。
  */
 app.get("/api/zones", bearerAuth, async (c) => {
-  const summary = await listZones(c.env.R2);
-  return c.json(summary);
+  const items = await listZonesFromDb(c.env.DB);
+  return c.json({ count: items.length, items });
 });
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));

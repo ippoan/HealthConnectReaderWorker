@@ -29,6 +29,18 @@
       "bucket_name": "hcreader-data"
     }
   ],
+  // D1 — 突合用メタデータインデックス。R2 (生 JSON) と二重に持つ。
+  // workouts テーブルに HC / Zones 双方の workout 要約 (date / start_at /
+  // end_at / distance / duration ...) を入れて、SQL で source 横断クエリ
+  // を可能にする。schema は `migrations/*.sql` で管理。
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hcreader-meta",
+      "database_id": "f83bd316-1def-46f9-a0a2-20309fea1337",
+      "migrations_dir": "migrations"
+    }
+  ],
   // Bearer token は CF Secrets Store (account-level) 経由で binding。
   // secrets-inventory が管理する store (`bd7bc91a...`) に
   // `hcreader-upload-token` を投入し、env var `UPLOAD_TOKEN` として
