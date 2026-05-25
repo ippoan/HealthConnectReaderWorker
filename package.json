@@ -1,0 +1,25 @@
+{
+  "name": "healthconnectreader-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker hosting WebView UI + R2-backed upload endpoint for ippoan/HealthConnectReader (Android).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.5.41",
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "@vitest/coverage-istanbul": "^2.1.9",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.9",
+    "wrangler": "^4.67.0"
+  }
+}

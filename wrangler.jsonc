@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "healthconnectreader-worker",
+  "main": "src/index.ts",
+  "account_id": "24b45709d060d957340180e995f0d373",
+  "compatibility_date": "2024-12-01",
+  "observability": {
+    "enabled": true
+  },
+  // secrets-inventory / ref-files-worker と同じく **single-env 運用**
+  // (staging = prod)。CI からは PR merge / tag push どちらも root config の
+  // `npx wrangler deploy` を走らせる。workers.dev 公開のみで、custom domain
+  // が決まったら `routes` を生やす。Refs ippoan/HealthConnectReader#6
+  "workers_dev": true,
+  "vars": {
+    "WORKER_ENV": "prod"
+  },
+  // R2 bucket — `hc/{yyyy}/{mm-dd}.json` で 1 日 1 ファイル保存。
+  // bucket は事前に `npx wrangler r2 bucket create hcreader-data` で作成。
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "hcreader-data"
+    }
+  ],
+  // Bearer token は CF Secrets Store (account-level) 経由で binding。
+  // secrets-inventory が管理する store (`bd7bc91a...`) に
+  // `hcreader-upload-token` を投入し、env var `UPLOAD_TOKEN` として
+  // worker から参照する。値は GCP Secret Manager 側にも同名で backup
+  // (secret-verify-gcp.yml で確認)。
+  "secrets_store_secrets": [
+    {
+      "binding": "UPLOAD_TOKEN",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "hcreader-upload-token"
+    }
+  ],
+  // ci-workflows/secret-verify-gcp.yml の入力。GCP Secret Manager 上に
+  // この名前の secret が存在するかを CI で verify する。CF Secrets Store
+  // の secret_name と完全に揃えて宣言する。
+  "secrets": {
+    "required": [
+      "hcreader-upload-token"
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+name: CI
+
+# secrets-inventory / ref-files-worker と同じ frontend-ci.yml caller pattern。
+# single-env 運用 — PR merge / tag push どちらも root `wrangler deploy` を走らせる。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+# frontend-ci.yml は nested secret-verify / auto-merge を持つため top-level で
+# contents:write + pull-requests:write + id-token:write を declare する必要が
+# ある (`if:` で skip される run でも reusable parse 時の caller permissions
+# check で startup_failure するため)。
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
+    with:
+      project_type: 'worker'
+      install_command: 'npm install'
+      typecheck_command: 'npx tsc --noEmit'
+      has_tests: true
+      # single-env: staging deploy と release deploy は同じ root config を叩く。
+      deploy_staging_script: 'npx wrangler deploy'
+      deploy_release_script: 'npx wrangler deploy'
+    secrets: inherit
