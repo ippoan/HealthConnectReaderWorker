@@ -230,6 +230,80 @@ describe("POST /api/upload-batch", () => {
     const day2 = await env.R2.get("hc/2026/04-02.json");
     expect(await day2!.text()).toBe('{"sessions":[{"x":1}]}');
   });
+
+  it("incremental: skips days whose R2 key already exists (Refs #7)", async () => {
+    // Pre-populate one of the two days
+    await env.R2.put("hc/2026/06-10.json", '{"old":true}');
+    const body = JSON.stringify({
+      days: [
+        { date: "2026-06-10", payload: { fresh: 1 } }, // should be skipped (already exists)
+        { date: "2026-06-11", payload: { fresh: 2 } }, // should be written
+      ],
+    });
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as {
+      ok: boolean;
+      written: number;
+      keys: string[];
+      skipped: Array<{ index: number; reason: string; key?: string }>;
+      force: boolean;
+    };
+    expect(j.written).toBe(1);
+    expect(j.keys).toEqual(["hc/2026/06-11.json"]);
+    expect(j.force).toBe(false);
+    expect(j.skipped).toContainEqual({
+      index: 0,
+      reason: "already_exists",
+      key: "hc/2026/06-10.json",
+    });
+    // existing key was untouched
+    expect(await (await env.R2.get("hc/2026/06-10.json"))!.text()).toBe('{"old":true}');
+    // new key was written
+    expect(await (await env.R2.get("hc/2026/06-11.json"))!.text()).toBe('{"fresh":2}');
+  });
+
+  it("force=true overrides incremental and overwrites existing keys", async () => {
+    await env.R2.put("hc/2026/07-10.json", '{"old":true}');
+    const body = JSON.stringify({
+      days: [{ date: "2026-07-10", payload: { fresh: true } }],
+    });
+    const r = await app.request(
+      "/api/upload-batch?force=true",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { written: number; force: boolean };
+    expect(j.written).toBe(1);
+    expect(j.force).toBe(true);
+    expect(await (await env.R2.get("hc/2026/07-10.json"))!.text()).toBe('{"fresh":true}');
+  });
+
+  it("200 (written=0) when all valid days already exist", async () => {
+    await env.R2.put("hc/2026/08-01.json", "{}");
+    await env.R2.put("hc/2026/08-02.json", "{}");
+    const body = JSON.stringify({
+      days: [
+        { date: "2026-08-01", payload: { a: 1 } },
+        { date: "2026-08-02", payload: { a: 2 } },
+      ],
+    });
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; written: number; skipped: Array<{ reason: string }> };
+    expect(j.ok).toBe(true);
+    expect(j.written).toBe(0);
+    expect(j.skipped.filter((s) => s.reason === "already_exists")).toHaveLength(2);
+  });
 });
 
 describe("summarizeHistory", () => {
