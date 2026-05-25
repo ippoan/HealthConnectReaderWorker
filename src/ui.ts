@@ -80,7 +80,18 @@ async function uploadPast30() {
   setStatus("過去 30 日読取中…");
   let batch;
   try { batch = window.HC.readPastDays(30); } catch (e) { setStatus("読取失敗: " + e); return; }
-  setStatus("送信中…");
+  // bridge が error JSON (= { error, message } shape) を返したら detect (Refs #5)
+  try {
+    const peek = JSON.parse(batch);
+    if (peek && peek.error) {
+      setStatus("bridge err: " + peek.error + " / " + (peek.message || "").slice(0, 120));
+      return;
+    }
+  } catch {
+    setStatus("bridge JSON parse 失敗: " + (batch || "").slice(0, 120));
+    return;
+  }
+  setStatus("送信中… (" + batch.length + " bytes)");
   const r = await fetch("/api/upload-batch", {
     method: "POST",
     headers: {
@@ -89,7 +100,11 @@ async function uploadPast30() {
     },
     body: batch,
   });
-  if (!r.ok) { setStatus("upload-batch 失敗: " + r.status); return; }
+  if (!r.ok) {
+    const errText = await r.text().catch(() => "");
+    setStatus("upload-batch " + r.status + ": " + errText.slice(0, 200));
+    return;
+  }
   const j = await r.json();
   setStatus("✓ " + j.written + " 日分 upload");
   refreshHistory();
