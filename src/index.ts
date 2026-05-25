@@ -8,7 +8,8 @@
  *   POST /api/upload-batch  → Bearer → split { days: [{date, payload}] } into N day files
  *   POST /api/upload-zones  → Bearer → iOS Zones (Apple Watch) workout JSON 1 件を
  *                              zones/{yyyy}/{mm}-{dd}/{uuid}.json に保存
- *   GET  /api/history       → Bearer → { count, latest }
+ *   GET  /api/history       → Bearer → { count, latest } (hc/ のみ)
+ *   GET  /api/zones         → Bearer → { count, items[] } Zones アップロード履歴
  *
  * Refs ippoan/HealthConnectReader#6
  * Refs ippoan/HealthConnectReaderWorker#9
@@ -18,6 +19,7 @@ import { Hono } from "hono";
 import { bearerAuth } from "./auth";
 import type { AppEnv } from "./env";
 import {
+  listZones,
   summarizeHistory,
   uploadKeyFor,
   uploadKeyForDateString,
@@ -207,6 +209,16 @@ app.post("/api/upload-zones", bearerAuth, async (c) => {
 
 app.get("/api/history", bearerAuth, async (c) => {
   const summary = await summarizeHistory(c.env.R2);
+  return c.json(summary);
+});
+
+/**
+ * `GET /api/zones` — Zones workout のアップロード履歴を返す。
+ * R2 list だけで構築 (= 中身は読まない) し、形式不一致 key は無視する。
+ * `uploaded` 降順で `{ count, items: [{date, uuid, key, uploaded}] }`。
+ */
+app.get("/api/zones", bearerAuth, async (c) => {
+  const summary = await listZones(c.env.R2);
   return c.json(summary);
 });
 

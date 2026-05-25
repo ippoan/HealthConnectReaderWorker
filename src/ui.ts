@@ -94,6 +94,12 @@ export const INDEX_HTML = `<!doctype html>
       Zones JSON を送信
     </button>
     <p id="zones-status" class="text-sm text-slate-600 min-h-[1.25rem]"></p>
+    <div>
+      <h3 class="text-sm font-semibold text-slate-700 mt-2 mb-1">アップロード済み</h3>
+      <ul id="zones-list" class="text-xs text-slate-600 divide-y divide-slate-100">
+        <li class="py-1 text-slate-400">読込中…</li>
+      </ul>
+    </div>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4">
@@ -131,6 +137,38 @@ async function refreshHistory() {
   if (!r.ok) { $("history").textContent = "history fetch failed (" + r.status + ")"; return; }
   const j = await r.json();
   $("history").textContent = j.count + " 件 / 最新: " + (j.latest ?? "なし");
+}
+
+async function refreshZonesList() {
+  const token = getZonesToken();
+  const list = $("zones-list");
+  if (!token) {
+    list.innerHTML = '<li class="py-1 text-slate-400">token 未入力</li>';
+    return;
+  }
+  const r = await fetch("/api/zones", { headers: { Authorization: "Bearer " + token } });
+  if (!r.ok) {
+    list.innerHTML = '<li class="py-1 text-rose-600">zones fetch failed (' + r.status + ")</li>";
+    return;
+  }
+  const j = await r.json();
+  if (!j.items || j.items.length === 0) {
+    list.innerHTML = '<li class="py-1 text-slate-400">なし</li>';
+    return;
+  }
+  // uploaded は ISO 8601 UTC。端末ローカルの HH:MM で表示
+  const fmt = (iso) => {
+    const d = new Date(iso);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return hh + ":" + mm;
+  };
+  list.innerHTML = j.items
+    .map((it) =>
+      '<li class="py-1 flex justify-between gap-2"><span>' + it.date + " " + fmt(it.uploaded) +
+      '</span><span class="font-mono text-slate-500">' + it.uuid.slice(0, 8) + "…</span></li>",
+    )
+    .join("");
 }
 
 async function uploadNow() {
@@ -223,6 +261,7 @@ async function uploadZones() {
   const j = await r.json();
   setZonesStatus("✓ " + j.date + " / " + j.uuid.slice(0, 8) + "…");
   refreshHistory();
+  refreshZonesList();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -242,6 +281,7 @@ document.addEventListener("DOMContentLoaded", () => {
   } catch {}
   $("zones-upload-btn").addEventListener("click", uploadZones);
   refreshHistory().catch(() => {});
+  refreshZonesList().catch(() => {});
 });
 </script>
 </body>

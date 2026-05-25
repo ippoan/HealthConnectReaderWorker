@@ -17,7 +17,8 @@ Refs ippoan/HealthConnectReader#6
 | POST   | `/api/upload`        | `Bearer ${TOKEN}` | request body の JSON を R2 に PUT (`hc/yyyy/mm-dd.json`)   |
 | POST   | `/api/upload-batch`  | `Bearer ${TOKEN}` | `{days:[{date,payload}]}` を 1 リクエストで N 日分投入     |
 | POST   | `/api/upload-zones`  | `Bearer ${TOKEN}` | iOS Zones (Apple Watch) workout JSON 1 件を `zones/yyyy/mm-dd/{uuid}.json` に保存 |
-| GET    | `/api/history`       | `Bearer ${TOKEN}` | R2 listing → `{ count, latest }` を返す                    |
+| GET    | `/api/history`       | `Bearer ${TOKEN}` | R2 `hc/` listing → `{ count, latest }` を返す              |
+| GET    | `/api/zones`         | `Bearer ${TOKEN}` | R2 `zones/` listing → `{ count, items: [{date, uuid, key, uploaded}] }` (新しい順) |
 
 `${TOKEN}` は CF Secrets Store の `hcreader-upload-token` (binding 名
 `UPLOAD_TOKEN`)。GCP Secret Manager にも同名で backup されており、

@@ -76,3 +76,46 @@ function dateFromKey(key: string): string | null {
   if (!m) return null;
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
+
+export interface ZonesListItem {
+  date: string;       // YYYY-MM-DD (key から)
+  uuid: string;       // Zones の workout uuid
+  key: string;        // R2 key
+  uploaded: string;   // R2 が記録する uploaded ISO 8601 (= R2Object.uploaded)
+}
+
+export interface ZonesListSummary {
+  count: number;
+  items: ZonesListItem[];
+}
+
+const ZONES_KEY_RE =
+  /^zones\/(\d{4})\/(\d{2})-(\d{2})\/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\.json$/;
+
+/**
+ * R2 上の Zones workout 一覧を listing から構築する。ファイル中身は読まない
+ * (= R2 GET cost なし)。
+ * - 形式に合わない key は無視 (forward-compat / 異物混入対策)
+ * - sort: uploaded desc (= 新しい順)
+ * - 1 page (limit 1000) で全件取れる前提。将来 1000 件超を想定する時に pagination 追加
+ */
+export async function listZones(bucket: R2Bucket): Promise<ZonesListSummary> {
+  const items: ZonesListItem[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix: "zones/", cursor, limit: 1000 });
+    for (const obj of page.objects) {
+      const m = ZONES_KEY_RE.exec(obj.key);
+      if (!m) continue;
+      items.push({
+        date: `${m[1]}-${m[2]}-${m[3]}`,
+        uuid: m[4],
+        key: obj.key,
+        uploaded: obj.uploaded.toISOString(),
+      });
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  items.sort((a, b) => (a.uploaded < b.uploaded ? 1 : a.uploaded > b.uploaded ? -1 : 0));
+  return { count: items.length, items };
+}
