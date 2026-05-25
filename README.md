@@ -27,15 +27,20 @@ Refs ippoan/HealthConnectReader#6
 `wrangler d1 migrations apply` は **使わない**。CI token に D1:Edit を足さずに済むよう、
 Worker 自身が DB binding 経由で schema を流す方式にしてある。
 
+**自動化済**: `.github/workflows/migrate.yml` が `workflow_run` で CI 完走を検知 →
+`POST /_admin/migrate` を `HCREADER_RELEASE_UPLOAD_TOKEN` 付きで叩く。
+schema 変更時は `src/migrations.ts` の `SCHEMA_STATEMENTS` 末尾に `ALTER TABLE` 等を
+追記して PR → merge するだけで自動で本番 D1 に反映される (すべて `IF NOT EXISTS` で書く)。
+
+手元から手動で流したい時:
+
 ```sh
-# deploy 後に 1 回だけ叩く (schema 無変更なら no-op で 200 が返る)
 curl -X POST https://hcreader.ippoan.org/_admin/migrate \
   -H "Authorization: Bearer $UPLOAD_TOKEN"
 # → { "ok": true, "ran": 4, "statements": 4 }
 ```
 
-schema 変更時は `src/migrations.ts` の `SCHEMA_STATEMENTS` 末尾に `ALTER TABLE` 等を
-追記して deploy → 上のコマンドを再実行する (すべて `IF NOT EXISTS` で書く)。
+または GitHub Actions の `D1 Migrate` workflow を `workflow_dispatch` で手動 trigger。
 
 ### D1 `workouts` テーブル (突合用 metadata index)
 
