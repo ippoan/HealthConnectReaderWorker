@@ -755,18 +755,27 @@ function renderSpeedChart(j) {
   const hcRow = j.hc && j.hc.row;
   const zRow = j.zones && j.zones.row;
 
-  // 1. HC 時系列 samples (= 端末が SpeedRecord に samples[] を入れていれば)
-  const hcPoints = [];
+  // 1. HC 時系列 samples を **source (package name) 別** に集約する。
+  //    Fitbit / Google Fit / Samsung Health 等は同期遅延でズレることが多いので、
+  //    どの source の系列か明示して user が判断できるようにする。
+  const hcSeriesBySource = new Map(); // src -> [{x, y}]
   const speeds = hcRaw && Array.isArray(hcRaw.speeds) ? hcRaw.speeds : [];
   for (const s of speeds) {
     if (!s || !Array.isArray(s.samples)) continue;
+    const src = typeof s.source === "string" && s.source ? s.source : "unknown";
+    let arr = hcSeriesBySource.get(src);
+    if (!arr) { arr = []; hcSeriesBySource.set(src, arr); }
     for (const sa of s.samples) {
       if (sa && typeof sa.time === "string" && typeof sa.kmh === "number") {
-        hcPoints.push({ x: new Date(sa.time).getTime(), y: sa.kmh });
+        arr.push({ x: new Date(sa.time).getTime(), y: sa.kmh });
       }
     }
   }
-  hcPoints.sort((a, b) => a.x - b.x);
+  for (const arr of hcSeriesBySource.values()) arr.sort((a, b) => a.x - b.x);
+  // 全 source の最小/最大 x も計算
+  let allXs = [];
+  for (const arr of hcSeriesBySource.values()) for (const p of arr) allXs.push(p.x);
+  const hcHasSamples = allXs.length > 0;
 
   // 2. HC / Zones 平均速度 (distance_m / duration_sec から)
   function avg(row) {
@@ -778,9 +787,9 @@ function renderSpeedChart(j) {
 
   // X 軸範囲: HC 時系列が有ればそこから、無ければ workout 期間で平均線を引く
   let xMin, xMax;
-  if (hcPoints.length > 0) {
-    xMin = hcPoints[0].x;
-    xMax = hcPoints[hcPoints.length - 1].x;
+  if (hcHasSamples) {
+    xMin = Math.min.apply(null, allXs);
+    xMax = Math.max.apply(null, allXs);
   } else {
     const row = hcRow || zRow;
     if (row && row.start_at && row.end_at) {
@@ -789,13 +798,31 @@ function renderSpeedChart(j) {
     }
   }
 
+  // source ごとの色 palette。Fitbit / Google Fit / Samsung Health 等を明示。
+  const SRC_COLORS = ["#059669", "#0ea5e9", "#a855f7", "#f97316", "#dc2626", "#0d9488"];
+  function shortSource(src) {
+    // "com.fitbit.FitbitMobile" → "Fitbit", "com.google.android.apps.fitness" → "Google Fit", 等
+    if (src.includes("fitbit")) return "Fitbit";
+    if (src.includes("google.android.apps.fitness") || src.includes("google.android.gms.fitness")) return "Google Fit";
+    if (src.includes("samsung.health")) return "Samsung Health";
+    if (src.includes("healthconnect")) return "Health Connect";
+    if (src === "unknown") return "(source 不明)";
+    // 末尾セグメント
+    const parts = src.split(".");
+    return parts[parts.length - 1] || src;
+  }
+
   const datasets = [];
-  if (hcPoints.length > 0) {
+  let colorIdx = 0;
+  for (const [src, pts] of hcSeriesBySource) {
+    if (pts.length === 0) continue;
+    const color = SRC_COLORS[colorIdx % SRC_COLORS.length];
+    colorIdx++;
     datasets.push({
-      label: "HC 速度 (時系列)",
-      data: hcPoints.map((p) => ({ x: p.x, y: p.y })),
-      borderColor: "#059669",
-      backgroundColor: "rgba(5,150,105,0.1)",
+      label: "HC 速度 [" + shortSource(src) + "] " + pts.length + " 点",
+      data: pts.map((p) => ({ x: p.x, y: p.y })),
+      borderColor: color,
+      backgroundColor: color + "22",
       tension: 0.2,
       pointRadius: 0,
     });
