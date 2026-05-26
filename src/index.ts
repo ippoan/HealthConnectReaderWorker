@@ -602,12 +602,21 @@ app.get("/api/zones", apiAuth, async (c) => {
  * Refs ippoan/HealthConnectReaderWorker#18
  */
 app.get("/api/workout", apiAuth, async (c) => {
-  const hcId = c.req.query("hc");
-  const zonesId = c.req.query("zones");
-  if (!hcId && !zonesId) {
+  // hc / zones は comma-separated 可。同一 index が 1 セッション (片方空文字 = 欠落)。
+  // 例: hc=a,b,c&zones=x,,y → セッション 0={hc:a, zones:x}, 1={hc:b}, 2={hc:c, zones:y}
+  // backward compat: 単一 id (comma 無) は 1 セッション扱い。
+  const hcParam = c.req.query("hc") ?? "";
+  const zonesParam = c.req.query("zones") ?? "";
+  if (!hcParam && !zonesParam) {
     return c.json({ error: "missing_hc_or_zones" }, 400);
   }
+  const hcIds = hcParam.split(",").map((s) => s.trim());
+  const zonesIds = zonesParam.split(",").map((s) => s.trim());
+  const n = Math.max(hcIds.length, zonesIds.length);
+  if (n > 20) return c.json({ error: "too_many_sessions" }, 400);
+
   const fetchOne = async (source: "hc" | "zones", id: string) => {
+    if (!id) return null;
     const row = await c.env.DB.prepare(
       "SELECT * FROM workouts WHERE source = ? AND id = ?",
     ).bind(source, id).first<Record<string, unknown>>();
@@ -622,12 +631,19 @@ app.get("/api/workout", apiAuth, async (c) => {
     }
     return { row, raw };
   };
-  const hc = hcId ? await fetchOne("hc", hcId) : null;
-  const zones = zonesId ? await fetchOne("zones", zonesId) : null;
-  if (!hc && !zones) {
+
+  const sessions: Array<{ hc: unknown; zones: unknown }> = [];
+  for (let i = 0; i < n; i++) {
+    const hc = await fetchOne("hc", hcIds[i] ?? "");
+    const zones = await fetchOne("zones", zonesIds[i] ?? "");
+    if (hc || zones) sessions.push({ hc, zones });
+  }
+  if (sessions.length === 0) {
     return c.json({ error: "not_found" }, 404);
   }
-  return c.json({ hc, zones });
+  // backward compat: 単一セッションの場合は legacy shape (hc / zones) も併載。
+  const first = sessions[0];
+  return c.json({ sessions, hc: first.hc, zones: first.zones });
 });
 
 /**
