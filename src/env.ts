@@ -13,10 +13,11 @@ export type SecretsStoreBinding = { get(): Promise<string> };
 export interface Env {
   WORKER_ENV: string;
   UPLOAD_TOKEN: SecretsStoreBinding | string;
-  // auth-worker と共有する HS256 JWT 署名鍵。Workers secret (Secrets Store 移行は別 PR)
-  // で投入する: `npx wrangler secret put JWT_SECRET` で auth-worker と同じ値を貼る。
-  // 未設定でも Bearer 認証は動く (= 部分起動)、cookie 認証が無効化されるだけ。
-  JWT_SECRET?: string;
+  // auth-worker と共有する HS256 JWT 署名鍵。CF Secrets Store binding 経由で
+  // 受け取り、production では `{ get(): Promise<string> }` 形になる。vitest からは
+  // plain string を inject するので union 型にしてある。未設定でも Bearer 認証は
+  // 動く (= cookie 経路だけが無効化される)。
+  JWT_SECRET?: SecretsStoreBinding | string;
   R2: R2Bucket;
   DB: D1Database;
 }
@@ -31,6 +32,12 @@ export const ALLOWED_EMAILS = ["m.tama.ramu@gmail.com"] as const;
 export async function readUploadToken(env: Env): Promise<string> {
   const t = env.UPLOAD_TOKEN;
   return typeof t === "string" ? t : await t.get();
+}
+
+export async function readJwtSecret(env: Env): Promise<string> {
+  const s = env.JWT_SECRET;
+  if (!s) return "";
+  return typeof s === "string" ? s : await s.get();
 }
 
 export type AppEnv = { Bindings: Env };

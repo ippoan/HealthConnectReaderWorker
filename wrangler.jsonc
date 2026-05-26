@@ -63,6 +63,11 @@
       "binding": "UPLOAD_TOKEN",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "hcreader-upload-token"
+    },
+    {
+      "binding": "JWT_SECRET",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "JWT_SECRET"
     }
   ]
 }
