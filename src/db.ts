@@ -379,8 +379,29 @@ export async function listWorkoutsSinceDays(
  * - `hc_only`: HC session のみ (= Apple Watch 未装着 or Zones 未 upload)
  * - `zones_only`: Zones workout のみ (= 端末未同期 / HC 未 upload)
  */
+/**
+ * `/api/workouts` の 1 アイテム。3 種:
+ * - `matched`: HC と Zones の連結成分グループ (1:1 / 1:N / N:1 / N:N)。
+ *   - `hcs[]`, `zoneses[]`: グループに含まれる行
+ *   - `edges[]`: グループ内のエッジ (hc_id, zones_id, overlap_sec, manual)
+ *   - `has_manual`: 1 つでも手動 pair edge が含まれていれば true
+ * - `hc_only`: どの Zones とも繋がらなかった HC 単独
+ * - `zones_only`: どの HC とも繋がらなかった Zones 単独
+ */
+export interface MatchEdge {
+  hc_id: string;
+  zones_id: string;
+  overlap_sec: number;
+  manual: boolean;
+}
 export type WorkoutMatchItem =
-  | { type: "matched"; hc: WorkoutRow; zones: WorkoutRow; overlap_sec: number }
+  | {
+      type: "matched";
+      hcs: WorkoutRow[];
+      zoneses: WorkoutRow[];
+      edges: MatchEdge[];
+      has_manual: boolean;
+    }
   | { type: "hc_only"; hc: WorkoutRow }
   | { type: "zones_only"; zones: WorkoutRow };
 
@@ -393,74 +414,142 @@ export interface WorkoutDay {
 }
 
 /**
- * 1 日分の rows を HC × Zones で greedy ペアリング。
+ * 1 日分の rows を **連結成分** で matched / hc_only / zones_only に分類する。
  *
- * - 同日でも start_at の Z (UTC) 時刻区間が overlap しない場合は別 workout 扱い
- * - HC を start_at 昇順で走査し、各 HC に対して overlap_sec が最大の未使用
- *   Zones を 1 つ割り当てる。残り Zones は zones_only として出す
- * - start_at / end_at が null の row は overlap 判定不能なので **常に _only** 扱い
+ * グラフモデル: nodes = HC rows ∪ Zones rows。edges:
+ *   1. **manual pair** (workout_pairs): 必ず張る
+ *   2. **auto pair** (時刻 overlap > 0 の HC↔Zones): unpair に登録されていない
+ *      限り張る (= workout_unpairs で否定済みの自動マッチは無効化される)
+ *
+ * Union-Find で連結成分を抜き、各成分について:
+ *   - HC ≥1 ∧ Zones ≥1 → matched (1:1 / 1:N / N:1 / N:N すべて含む)
+ *   - HC のみ → 各 row が hc_only として分裂
+ *   - Zones のみ → 各 row が zones_only として分裂
+ *
+ * 同日内で「午前ワークアウト」「午後ワークアウト」みたいに自然に分かれるのは、
+ * 時刻 overlap が無いので別の連結成分になるため。長時間 workout が複数 record
+ * に分かれた場合 (= 1 HC + N Zones) も連結成分 1 つにまとまる。
+ *
+ * 出力は最も早い start_at で昇順 sort。
  *
  * Refs ippoan/HealthConnectReaderWorker#18
  */
-export function pairHcZones(rows: WorkoutRow[]): WorkoutMatchItem[] {
-  const hcAll = rows.filter((r) => r.source === "hc");
-  const zonesAll = rows.filter((r) => r.source === "zones");
-  // start_at 昇順で安定 (DESC fetch を引っくり返す)
-  const hcs = [...hcAll].sort(byStartAtAsc);
-  const remainingZones = new Set(zonesAll);
-  const items: WorkoutMatchItem[] = [];
+export function pairHcZones(
+  rows: WorkoutRow[],
+  manualPairs: ReadonlySet<string> = new Set(),
+  unpairs: ReadonlySet<string> = new Set(),
+): WorkoutMatchItem[] {
+  // `<hc_id>::<zones_id>` 形式の string set で manual / unpair を渡す
+  const hcs = rows.filter((r) => r.source === "hc");
+  const zones = rows.filter((r) => r.source === "zones");
+  const hcById = new Map(hcs.map((h) => [h.id, h]));
+  const zoneById = new Map(zones.map((z) => [z.id, z]));
 
+  // (a) edge 列挙
+  const edges: MatchEdge[] = [];
+  // manual edges (両側がこの day グループに居る場合のみ)
+  for (const key of manualPairs) {
+    const [hcId, zId] = key.split("::");
+    if (!hcId || !zId) continue;
+    const hc = hcById.get(hcId);
+    const z = zoneById.get(zId);
+    if (!hc || !z) continue;
+    edges.push({
+      hc_id: hcId,
+      zones_id: zId,
+      overlap_sec: overlapSec(hc, z),
+      manual: true,
+    });
+  }
+  // auto edges (時刻 overlap > 0、unpair に無いもの)
   for (const hc of hcs) {
-    if (hc.start_at === null || hc.end_at === null) {
-      items.push({ type: "hc_only", hc });
-      continue;
+    if (!hc.start_at || !hc.end_at) continue;
+    for (const z of zones) {
+      if (!z.start_at || !z.end_at) continue;
+      const ov = overlapSec(hc, z);
+      if (ov <= 0) continue;
+      const key = `${hc.id}::${z.id}`;
+      if (unpairs.has(key)) continue;
+      // 既に manual edge があるならスキップ (重複しない)
+      if (manualPairs.has(key)) continue;
+      edges.push({ hc_id: hc.id, zones_id: z.id, overlap_sec: ov, manual: false });
     }
-    const hcStart = Date.parse(hc.start_at);
-    const hcEnd = Date.parse(hc.end_at);
-    if (Number.isNaN(hcStart) || Number.isNaN(hcEnd)) {
-      items.push({ type: "hc_only", hc });
-      continue;
+  }
+
+  // (b) Union-Find
+  const parent = new Map<string, string>();
+  const nodeId = (source: "hc" | "zones", id: string) => `${source}:${id}`;
+  function find(x: string): string {
+    if (!parent.has(x)) { parent.set(x, x); return x; }
+    let root = x;
+    while (parent.get(root)! !== root) root = parent.get(root)!;
+    // path compression
+    let cur = x;
+    while (parent.get(cur)! !== root) {
+      const next = parent.get(cur)!;
+      parent.set(cur, root);
+      cur = next;
     }
-    let best: WorkoutRow | null = null;
-    let bestOverlap = 0;
-    for (const z of remainingZones) {
-      if (z.start_at === null || z.end_at === null) continue;
-      const zs = Date.parse(z.start_at);
-      const ze = Date.parse(z.end_at);
-      if (Number.isNaN(zs) || Number.isNaN(ze)) continue;
-      const overlap = Math.max(0, Math.min(hcEnd, ze) - Math.max(hcStart, zs));
-      if (overlap > bestOverlap) {
-        best = z;
-        bestOverlap = overlap;
-      }
-    }
-    if (best) {
+    return root;
+  }
+  function union(a: string, b: string): void {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+  for (const h of hcs) find(nodeId("hc", h.id));
+  for (const z of zones) find(nodeId("zones", z.id));
+  for (const e of edges) union(nodeId("hc", e.hc_id), nodeId("zones", e.zones_id));
+
+  // (c) グループ化
+  interface Group { hcs: WorkoutRow[]; zoneses: WorkoutRow[]; edges: MatchEdge[]; }
+  const groups = new Map<string, Group>();
+  const getGroup = (root: string): Group => {
+    let g = groups.get(root);
+    if (!g) { g = { hcs: [], zoneses: [], edges: [] }; groups.set(root, g); }
+    return g;
+  };
+  for (const h of hcs) getGroup(find(nodeId("hc", h.id))).hcs.push(h);
+  for (const z of zones) getGroup(find(nodeId("zones", z.id))).zoneses.push(z);
+  for (const e of edges) getGroup(find(nodeId("hc", e.hc_id))).edges.push(e);
+
+  // (d) WorkoutMatchItem に成型
+  const items: WorkoutMatchItem[] = [];
+  for (const g of groups.values()) {
+    if (g.hcs.length > 0 && g.zoneses.length > 0) {
       items.push({
         type: "matched",
-        hc,
-        zones: best,
-        overlap_sec: Math.round(bestOverlap / 1000),
+        hcs: g.hcs.sort(byStartAtAsc),
+        zoneses: g.zoneses.sort(byStartAtAsc),
+        edges: g.edges,
+        has_manual: g.edges.some((e) => e.manual),
       });
-      remainingZones.delete(best);
+    } else if (g.hcs.length > 0) {
+      for (const h of g.hcs) items.push({ type: "hc_only", hc: h });
     } else {
-      items.push({ type: "hc_only", hc });
+      for (const z of g.zoneses) items.push({ type: "zones_only", zones: z });
     }
   }
-  for (const z of remainingZones) {
-    items.push({ type: "zones_only", zones: z });
-  }
-  // 全アイテムを start_at 昇順で並び替え (1 日に複数 workout がある時、
-  // matched / hc_only / zones_only を区別せず時系列で読めるようにする)。
+  // earliest start_at で昇順 sort
   items.sort((a, b) => {
-    const av = startAtOf(a);
-    const bv = startAtOf(b);
+    const av = startAtOf(a), bv = startAtOf(b);
     return av < bv ? -1 : av > bv ? 1 : 0;
   });
   return items;
 }
 
+function overlapSec(a: WorkoutRow, b: WorkoutRow): number {
+  if (!a.start_at || !a.end_at || !b.start_at || !b.end_at) return 0;
+  const as = Date.parse(a.start_at), ae = Date.parse(a.end_at);
+  const bs = Date.parse(b.start_at), be = Date.parse(b.end_at);
+  if (Number.isNaN(as) || Number.isNaN(ae) || Number.isNaN(bs) || Number.isNaN(be)) return 0;
+  return Math.max(0, Math.round((Math.min(ae, be) - Math.max(as, bs)) / 1000));
+}
+
 function startAtOf(it: WorkoutMatchItem): string {
-  if (it.type === "matched") return it.hc.start_at ?? "";
+  if (it.type === "matched") {
+    const all = [...it.hcs, ...it.zoneses].map((r) => r.start_at ?? "").filter(Boolean).sort();
+    return all[0] ?? "";
+  }
   if (it.type === "hc_only") return it.hc.start_at ?? "";
   return it.zones.start_at ?? "";
 }
@@ -501,27 +590,238 @@ function jstDateOf(iso: string | null): string | null {
  *
  * start_at が無い row だけ DB の `date` 列にフォールバック。
  */
-export function groupAndMatch(rows: WorkoutRow[]): WorkoutDay[] {
-  const byDate = new Map<string, WorkoutRow[]>();
-  for (const r of rows) {
-    const date = jstDateOf(r.start_at) ?? r.date;
-    const list = byDate.get(date) ?? [];
-    list.push(r);
-    byDate.set(date, list);
+export function groupAndMatch(
+  rows: WorkoutRow[],
+  manualPairs: ReadonlySet<string> = new Set(),
+  unpairs: ReadonlySet<string> = new Set(),
+): WorkoutDay[] {
+  // ----- 全 row に対する union-find (cross-day manual pair を許容するため) -----
+  const hcs = rows.filter((r) => r.source === "hc");
+  const zones = rows.filter((r) => r.source === "zones");
+  const hcIds = new Set(hcs.map((h) => h.id));
+  const zonesIds = new Set(zones.map((z) => z.id));
+  const parent = new Map<string, string>();
+  const nodeId = (src: "hc" | "zones", id: string) => `${src}:${id}`;
+  function find(x: string): string {
+    if (!parent.has(x)) { parent.set(x, x); return x; }
+    let root = x;
+    while (parent.get(root)! !== root) root = parent.get(root)!;
+    let cur = x;
+    while (parent.get(cur)! !== root) {
+      const next = parent.get(cur)!;
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
   }
+  function union(a: string, b: string): void {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+  for (const r of rows) find(nodeId(r.source, r.id));
+
+  // Manual edges 先 (cross-day も含む全て)
+  for (const key of manualPairs) {
+    const [hcId, zId] = key.split("::");
+    if (!hcId || !zId) continue;
+    if (!hcIds.has(hcId) || !zonesIds.has(zId)) continue;
+    union(nodeId("hc", hcId), nodeId("zones", zId));
+  }
+  // Auto edges (同 JST 日付内で時刻 overlap > 0、unpair に無いもの)
+  const rowDate = (r: WorkoutRow) => jstDateOf(r.start_at) ?? r.date;
+  const hcsByDate = new Map<string, WorkoutRow[]>();
+  const zonesByDate = new Map<string, WorkoutRow[]>();
+  for (const h of hcs) {
+    const d = rowDate(h);
+    const l = hcsByDate.get(d) ?? [];
+    l.push(h); hcsByDate.set(d, l);
+  }
+  for (const z of zones) {
+    const d = rowDate(z);
+    const l = zonesByDate.get(d) ?? [];
+    l.push(z); zonesByDate.set(d, l);
+  }
+  for (const [d, dayHcs] of hcsByDate) {
+    const dayZones = zonesByDate.get(d) ?? [];
+    for (const hc of dayHcs) {
+      for (const z of dayZones) {
+        const key = `${hc.id}::${z.id}`;
+        if (manualPairs.has(key)) continue;  // 既に union 済み
+        if (unpairs.has(key)) continue;
+        if (overlapSec(hc, z) > 0) {
+          union(nodeId("hc", hc.id), nodeId("zones", z.id));
+        }
+      }
+    }
+  }
+
+  // ----- 連結成分ごとに集約 -----
+  interface Group { hcs: WorkoutRow[]; zoneses: WorkoutRow[]; }
+  const groups = new Map<string, Group>();
+  const getGroup = (root: string): Group => {
+    let g = groups.get(root);
+    if (!g) { g = { hcs: [], zoneses: [] }; groups.set(root, g); }
+    return g;
+  };
+  for (const h of hcs) getGroup(find(nodeId("hc", h.id))).hcs.push(h);
+  for (const z of zones) getGroup(find(nodeId("zones", z.id))).zoneses.push(z);
+
+  // ----- 各成分を 1 個の WorkoutMatchItem に成型し、所属 date を決める -----
+  const itemsByDate = new Map<string, WorkoutMatchItem[]>();
+  const pushTo = (date: string, item: WorkoutMatchItem) => {
+    let list = itemsByDate.get(date);
+    if (!list) { list = []; itemsByDate.set(date, list); }
+    list.push(item);
+  };
+
+  for (const g of groups.values()) {
+    if (g.hcs.length > 0 && g.zoneses.length > 0) {
+      // matched group の edges を再構築
+      const edges: MatchEdge[] = [];
+      for (const hc of g.hcs) {
+        for (const z of g.zoneses) {
+          const key = `${hc.id}::${z.id}`;
+          if (manualPairs.has(key)) {
+            edges.push({ hc_id: hc.id, zones_id: z.id, overlap_sec: overlapSec(hc, z), manual: true });
+          } else if (!unpairs.has(key)) {
+            const ov = overlapSec(hc, z);
+            if (ov > 0) edges.push({ hc_id: hc.id, zones_id: z.id, overlap_sec: ov, manual: false });
+          }
+        }
+      }
+      const item: WorkoutMatchItem = {
+        type: "matched",
+        hcs: [...g.hcs].sort(byStartAtAsc),
+        zoneses: [...g.zoneses].sort(byStartAtAsc),
+        edges,
+        has_manual: edges.some((e) => e.manual),
+      };
+      // 所属 date = 最早 start_at の JST 日付 (= group 内で earliest)
+      const allStarts = [...g.hcs, ...g.zoneses]
+        .map((r) => r.start_at)
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+        .sort();
+      const date = allStarts[0]
+        ? jstDateOf(allStarts[0]) ?? rowDate(g.hcs[0] ?? g.zoneses[0])
+        : rowDate(g.hcs[0] ?? g.zoneses[0]);
+      pushTo(date, item);
+    } else if (g.hcs.length > 0) {
+      for (const hc of g.hcs) pushTo(rowDate(hc), { type: "hc_only", hc });
+    } else {
+      for (const z of g.zoneses) pushTo(rowDate(z), { type: "zones_only", zones: z });
+    }
+  }
+
+  // ----- WorkoutDay 配列に成型 -----
   const days: WorkoutDay[] = [];
-  for (const [date, dayRows] of byDate) {
-    const items = pairHcZones(dayRows);
-    days.push({
-      date,
-      hc_count: dayRows.filter((r) => r.source === "hc").length,
-      zones_count: dayRows.filter((r) => r.source === "zones").length,
-      matched_count: items.filter((it) => it.type === "matched").length,
-      items,
+  for (const [date, items] of itemsByDate) {
+    items.sort((a, b) => {
+      const ea = startAtOf(a), eb = startAtOf(b);
+      return ea < eb ? -1 : ea > eb ? 1 : 0;
     });
+    let hc_count = 0, zones_count = 0, matched_count = 0;
+    for (const it of items) {
+      if (it.type === "matched") {
+        hc_count += it.hcs.length;
+        zones_count += it.zoneses.length;
+        matched_count += 1;
+      } else if (it.type === "hc_only") hc_count += 1;
+      else zones_count += 1;
+    }
+    days.push({ date, hc_count, zones_count, matched_count, items });
   }
   days.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   return days;
+}
+
+// =============================================================================
+// 手動突合 (workout_pairs / workout_unpairs) helpers — Refs #18
+// =============================================================================
+
+export interface WorkoutPair {
+  hc_id: string;
+  zones_id: string;
+}
+
+/**
+ * workout_pairs と workout_unpairs を一括取得して `<hc_id>::<zones_id>` 形式の
+ * Set 2 つで返す。pairHcZones / groupAndMatch に渡しやすい形。
+ */
+export async function loadPairSets(
+  db: D1Database,
+): Promise<{ pairs: Set<string>; unpairs: Set<string> }> {
+  const [p, u] = await Promise.all([
+    db.prepare("SELECT hc_id, zones_id FROM workout_pairs").all<WorkoutPair>(),
+    db.prepare("SELECT hc_id, zones_id FROM workout_unpairs").all<WorkoutPair>(),
+  ]);
+  const pairs = new Set((p.results ?? []).map((r) => `${r.hc_id}::${r.zones_id}`));
+  const unpairs = new Set((u.results ?? []).map((r) => `${r.hc_id}::${r.zones_id}`));
+  return { pairs, unpairs };
+}
+
+/**
+ * 手動 pair edge を 1 本足す。同時に対応する unpair (= 同じ HC/Zones を
+ * 「別 workout」とした記録) を解除する。idempotent (PK 衝突は ignore)。
+ */
+export async function addManualPair(
+  db: D1Database,
+  hcId: string,
+  zonesId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(
+      "INSERT OR IGNORE INTO workout_pairs (hc_id, zones_id, created_at) VALUES (?, ?, ?)",
+    ).bind(hcId, zonesId, now),
+    db.prepare(
+      "DELETE FROM workout_unpairs WHERE hc_id = ? AND zones_id = ?",
+    ).bind(hcId, zonesId),
+  ]);
+}
+
+/**
+ * 手動 pair edge を 1 本削除 + unpair に追加 (= 「別 workout」と user が宣言)。
+ * auto pair も unpair で抑止されるので、時刻 overlap があっても再リンクされない。
+ */
+export async function removeManualPair(
+  db: D1Database,
+  hcId: string,
+  zonesId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(
+      "DELETE FROM workout_pairs WHERE hc_id = ? AND zones_id = ?",
+    ).bind(hcId, zonesId),
+    db.prepare(
+      "INSERT OR IGNORE INTO workout_unpairs (hc_id, zones_id, created_at) VALUES (?, ?, ?)",
+    ).bind(hcId, zonesId, now),
+  ]);
+}
+
+/**
+ * 1 つの matched group 内の全 edge を unpair に登録 (= グループまるごと解除)。
+ * UI の「解除」ボタンが叩く。
+ */
+export async function unpairGroup(
+  db: D1Database,
+  hcIds: string[],
+  zonesIds: string[],
+): Promise<void> {
+  if (hcIds.length === 0 || zonesIds.length === 0) return;
+  const now = new Date().toISOString();
+  const stmts: D1PreparedStatement[] = [];
+  for (const h of hcIds) {
+    for (const z of zonesIds) {
+      stmts.push(db.prepare(
+        "DELETE FROM workout_pairs WHERE hc_id = ? AND zones_id = ?",
+      ).bind(h, z));
+      stmts.push(db.prepare(
+        "INSERT OR IGNORE INTO workout_unpairs (hc_id, zones_id, created_at) VALUES (?, ?, ?)",
+      ).bind(h, z, now));
+    }
+  }
+  await db.batch(stmts);
 }
 
 /**

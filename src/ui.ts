@@ -359,41 +359,80 @@ function badge(type) {
 }
 function renderItem(it) {
   if (it.type === "matched") {
-    const hc = it.hc, z = it.zones;
-    const href = '/workout?hc=' + encodeURIComponent(hc.id) + '&zones=' + encodeURIComponent(z.id);
-    return [
-      '<a href="', href, '" class="block border-l-2 border-emerald-400 pl-2 py-1 hover:bg-slate-50 rounded-r">',
-      '<div class="flex items-center justify-between">',
-      '<span class="text-xs font-medium">', badge("matched"),
-      ' ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at),
-      ' ', escapeHtml(hc.activity_name || "—"), '</span>',
-      '<span class="text-[10px] text-slate-500">overlap ', fmtDur(it.overlap_sec), ' ›</span>',
-      '</div>',
-      '<div class="text-[11px] text-slate-600 grid grid-cols-2 gap-x-2">',
-      '<span>HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), '</span>',
-      '<span>Zones: ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"), '</span>',
-      '</div>',
-      '</a>',
-    ].join("");
+    // 連結成分グループ: hcs[] と zoneses[] を全部並べ、合計サマリ + 解除 button。
+    // 1 HC + 1 Zones の典型は従来通りに見えるが、複数だと「グループ」として
+    // 表示される。
+    const hcs = it.hcs || [];
+    const zs = it.zoneses || [];
+    const detailHc = hcs[0]; const detailZ = zs[0];
+    const detailHref = (detailHc && detailZ)
+      ? '/workout?hc=' + encodeURIComponent(detailHc.id) + '&zones=' + encodeURIComponent(detailZ.id)
+      : null;
+    const hcIdsJson = JSON.stringify(hcs.map((h) => h.id));
+    const zIdsJson  = JSON.stringify(zs.map((z) => z.id));
+    const manualBadge = it.has_manual
+      ? '<span class="inline-block px-1.5 py-0.5 text-[10px] rounded bg-violet-100 text-violet-700">手動</span>'
+      : '';
+    const html = [];
+    html.push('<div class="border-l-2 border-emerald-400 pl-2 py-1 space-y-1">');
+    html.push('<div class="flex items-center justify-between">');
+    html.push('<span class="text-xs font-medium">', badge("matched"), ' ', manualBadge,
+              ' ', String(hcs.length), ' HC × ', String(zs.length), ' Zones</span>');
+    html.push(
+      '<span class="text-[10px]">',
+      detailHref
+        ? '<a class="text-emerald-700 hover:underline" href="' + detailHref + '">詳細 ›</a>'
+        : '',
+      ' <button class="ml-2 text-rose-600 hover:underline" '
+        + 'data-action="unpair-group" '
+        + 'data-hc-ids="' + escapeHtml(hcIdsJson) + '" '
+        + 'data-zones-ids="' + escapeHtml(zIdsJson) + '">解除</button>',
+      '</span>',
+    );
+    html.push('</div>');
+    for (const hc of hcs) {
+      html.push('<div class="text-[11px] text-sky-700 pl-1">');
+      html.push('🏃 HC ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at), ' ',
+                escapeHtml(hc.activity_name || "—"),
+                ' · ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec));
+      html.push('</div>');
+    }
+    for (const z of zs) {
+      html.push('<div class="text-[11px] text-amber-700 pl-1">');
+      html.push('⌚ Zones ', fmtTime(z.start_at), '–', fmtTime(z.end_at), ' ',
+                escapeHtml(z.activity_name || "—"),
+                ' · ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"));
+      html.push('</div>');
+    }
+    html.push('</div>');
+    return html.join("");
   }
   if (it.type === "hc_only") {
     const hc = it.hc;
     return [
-      '<div class="border-l-2 border-sky-300 pl-2 py-1">',
+      '<div class="border-l-2 border-sky-300 pl-2 py-1 flex items-start justify-between">',
+      '<div>',
       '<div class="text-xs font-medium">', badge("hc_only"),
       ' ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at),
       ' ', escapeHtml(hc.activity_name || "—"), '</div>',
       '<div class="text-[11px] text-slate-600">HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), '</div>',
       '</div>',
+      '<button class="text-[10px] text-emerald-700 hover:underline shrink-0" ',
+        'data-action="link" data-side="hc" data-id="', escapeHtml(hc.id), '">Zones とリンク</button>',
+      '</div>',
     ].join("");
   }
   const z = it.zones;
   return [
-    '<div class="border-l-2 border-amber-300 pl-2 py-1">',
+    '<div class="border-l-2 border-amber-300 pl-2 py-1 flex items-start justify-between">',
+    '<div>',
     '<div class="text-xs font-medium">', badge("zones_only"),
     ' ', fmtTime(z.start_at), '–', fmtTime(z.end_at),
     ' ', escapeHtml(z.activity_name || "—"), '</div>',
     '<div class="text-[11px] text-slate-600">Zones: ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"), '</div>',
+    '</div>',
+    '<button class="text-[10px] text-emerald-700 hover:underline shrink-0" ',
+      'data-action="link" data-side="zones" data-id="', escapeHtml(z.id), '">HC とリンク</button>',
     '</div>',
   ].join("");
 }
@@ -423,6 +462,9 @@ async function reindexAll() {
   refreshWorkouts().catch(() => {});
 }
 
+// 最新の /api/workouts 結果を保持 (リンクモーダルが候補を引くため)
+let workoutsCache = null;
+
 async function refreshWorkouts() {
   const days = $("workouts-days").value;
   const summary = $("workouts-summary");
@@ -435,6 +477,7 @@ async function refreshWorkouts() {
     return;
   }
   const j = await r.json();
+  workoutsCache = j;
   const matched = j.days.reduce((acc, d) => acc + d.matched_count, 0);
   summary.textContent = j.day_count + " 日 / 合計 " + j.total + " workout / 突合 " + matched + " 件";
   if (j.day_count === 0) {
@@ -455,6 +498,93 @@ async function refreshWorkouts() {
   list.innerHTML = html.join("");
 }
 
+// =============================================================================
+// 手動突合 (リンク / 解除) UI
+// =============================================================================
+
+// matched group をまるごと解除 (data-hc-ids / data-zones-ids JSON 経由)
+async function unpairGroup(hcIds, zonesIds) {
+  if (!confirm(hcIds.length + ' HC × ' + zonesIds.length + ' Zones の突合を解除しますか？\n(以降の自動突合も時刻 overlap で再リンクされません)')) return;
+  const r = await fetch("/api/pair/delete", authFetchInit({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hc_ids: hcIds, zones_ids: zonesIds }),
+  }));
+  if (!r.ok) { alert("解除失敗 " + r.status); return; }
+  refreshWorkouts().catch(() => {});
+}
+
+// 候補一覧を出して 1 つ選ばせて pair 追加
+function openLinkPicker(side, id) {
+  // side: "hc" or "zones" — 自分側。候補は反対側 + matched group 内も含む
+  if (!workoutsCache) return;
+  const candidates = [];
+  for (const day of workoutsCache.days) {
+    for (const it of day.items) {
+      if (it.type === "matched") {
+        const arr = side === "hc" ? it.zoneses : it.hcs;
+        for (const r of arr) candidates.push({ row: r, day: day.date, label: side === "hc" ? "⌚" : "🏃", group: "突合中" });
+      } else if (side === "hc" && it.type === "zones_only") {
+        candidates.push({ row: it.zones, day: day.date, label: "⌚", group: "未突合" });
+      } else if (side === "zones" && it.type === "hc_only") {
+        candidates.push({ row: it.hc, day: day.date, label: "🏃", group: "未突合" });
+      }
+    }
+  }
+  if (candidates.length === 0) { alert("候補なし"); return; }
+  // モーダル DOM 構築
+  const wrap = document.createElement("div");
+  wrap.className = "fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50 p-2";
+  wrap.innerHTML = '<div class="bg-white w-full max-w-md rounded-2xl p-4 max-h-[80vh] overflow-auto">'
+    + '<div class="flex items-center justify-between mb-2">'
+    + '<h3 class="font-semibold">' + (side === "hc" ? "HC ← Zones" : "Zones ← HC") + ' を選択</h3>'
+    + '<button id="pick-cancel" class="text-sm text-slate-500">閉じる</button>'
+    + '</div>'
+    + '<p class="text-[10px] text-slate-400 mb-2">既に突合中の Zones/HC を選ぶと、そのグループに合流します。</p>'
+    + '<ul id="pick-list" class="space-y-1"></ul>'
+    + '</div>';
+  document.body.appendChild(wrap);
+  const ul = wrap.querySelector("#pick-list");
+  for (const c of candidates) {
+    const li = document.createElement("li");
+    li.className = "border border-slate-200 rounded p-2 text-xs hover:bg-emerald-50 cursor-pointer flex items-center justify-between";
+    li.innerHTML = '<span>' + c.label + ' <span class="font-medium">' + c.day + '</span> '
+      + fmtTime(c.row.start_at) + '–' + fmtTime(c.row.end_at) + ' '
+      + escapeHtml(c.row.activity_name || "—") + '</span>'
+      + '<span class="text-[10px] text-slate-500">' + c.group + '</span>';
+    li.addEventListener("click", async () => {
+      const hcId = side === "hc" ? id : c.row.id;
+      const zonesId = side === "hc" ? c.row.id : id;
+      const r = await fetch("/api/pair", authFetchInit({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hc_id: hcId, zones_id: zonesId }),
+      }));
+      wrap.remove();
+      if (!r.ok) { alert("リンク失敗 " + r.status); return; }
+      refreshWorkouts().catch(() => {});
+    });
+    ul.appendChild(li);
+  }
+  wrap.querySelector("#pick-cancel").addEventListener("click", () => wrap.remove());
+}
+
+// event delegation: workouts-days-list 内のボタンを 1 つの listener で捌く
+function onWorkoutsListClick(ev) {
+  const btn = ev.target.closest && ev.target.closest("button[data-action]");
+  if (!btn) return;
+  const action = btn.getAttribute("data-action");
+  if (action === "link") {
+    openLinkPicker(btn.getAttribute("data-side"), btn.getAttribute("data-id"));
+  } else if (action === "unpair-group") {
+    try {
+      const hcIds = JSON.parse(btn.getAttribute("data-hc-ids") || "[]");
+      const zIds = JSON.parse(btn.getAttribute("data-zones-ids") || "[]");
+      unpairGroup(hcIds, zIds);
+    } catch (e) { /* ignore */ }
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   $("env-badge").textContent = hasNative ? "native bridge: ✓" : "PWA / preview";
   $("upload-btn").addEventListener("click", uploadNow);
@@ -467,6 +597,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (hasNative) $("auto-toggle").checked = window.HC.isDailyUploadScheduled();
   $("zones-upload-btn").addEventListener("click", uploadZones);
   $("workouts-days").addEventListener("change", () => { refreshWorkouts().catch(() => {}); });
+  $("workouts-days-list").addEventListener("click", onWorkoutsListClick);
   $("reindex-btn").addEventListener("click", reindexAll);
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});

@@ -31,6 +31,25 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_workouts_date ON workouts(date)`,
   `CREATE INDEX IF NOT EXISTS idx_workouts_start_at ON workouts(start_at)`,
   `CREATE INDEX IF NOT EXISTS idx_workouts_source_date ON workouts(source, date)`,
+  // 手動突合 (manual pair) テーブル。多対多 (1 HC ↔ N Zones, N HC ↔ 1 Zones,
+  // N ↔ N) を許容するため UNIQUE は無し。pairHcZones が auto pair の edge と
+  // 一緒に union-find して連結成分を「matched group」として返す。Refs #18
+  `CREATE TABLE IF NOT EXISTS workout_pairs (
+    hc_id TEXT NOT NULL,
+    zones_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (hc_id, zones_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_workout_pairs_zones ON workout_pairs(zones_id)`,
+  // 自動突合 (時刻 overlap) を user が「これは別 workout」と否定した記録。
+  // pairHcZones は auto edge を生やす前にここを参照し、該当ペアは除外する。
+  // /api/pair/delete で INSERT, /api/pair (再リンク) で DELETE。Refs #18
+  `CREATE TABLE IF NOT EXISTS workout_unpairs (
+    hc_id TEXT NOT NULL,
+    zones_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (hc_id, zones_id)
+  )`,
 ];
 
 /**
