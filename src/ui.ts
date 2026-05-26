@@ -699,7 +699,7 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
     <h2 class="font-semibold">速度 + 心拍 (合成)</h2>
     <p id="combined-empty" class="text-xs text-slate-500 hidden">データ無し</p>
     <p class="text-[10px] text-slate-400">
-      左軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)、右軸=速度 (km/h, session 別の平均線)。
+      左軸=速度 (km/h, session 別の平均線)、右軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)。
       心拍・速度ともに session ごとフラットで、session の境界で step 状に変わる。
     </p>
     <div class="relative h-64"><canvas id="combined-chart"></canvas></div>
@@ -1151,17 +1151,17 @@ function renderCombinedChart(sessions) {
         },
       },
       scales: {
-        yHr: {
-          type: "linear", position: "left",
-          beginAtZero: false,
-          title: { display: true, text: "心拍 (bpm)", color: "#3b82f6" },
-          ticks: { color: "#3b82f6" },
-        },
         ySpeed: {
-          type: "linear", position: "right",
+          type: "linear", position: "left",
           beginAtZero: true,
           title: { display: true, text: "速度 (km/h)", color: "#dc2626" },
           ticks: { color: "#dc2626" },
+        },
+        yHr: {
+          type: "linear", position: "right",
+          beginAtZero: false,
+          title: { display: true, text: "心拍 (bpm)", color: "#3b82f6" },
+          ticks: { color: "#3b82f6" },
           grid: { drawOnChartArea: false },
         },
         x: {
