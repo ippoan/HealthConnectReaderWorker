@@ -19,12 +19,16 @@ import { Hono } from "hono";
 
 import { apiAuth, verifyAuthCookie } from "./auth";
 import {
+  addManualPair,
   groupAndMatch,
   hcPayloadToRows,
   hcSessionId,
   listKnownHcIds,
   listWorkoutsSinceDays,
   listZonesFromDb,
+  loadPairSets,
+  removeManualPair,
+  unpairGroup,
   upsertWorkout,
   zonesPayloadToRow,
 } from "./db";
@@ -681,14 +685,62 @@ app.get("/api/workouts", apiAuth, async (c) => {
     if (Number.isFinite(n) && n >= 1 && n <= 366) days = n;
     else return c.json({ error: "days_out_of_range" }, 400);
   }
-  const rows = await listWorkoutsSinceDays(c.env.DB, days);
-  const grouped = groupAndMatch(rows);
+  const [rows, pairSets] = await Promise.all([
+    listWorkoutsSinceDays(c.env.DB, days),
+    loadPairSets(c.env.DB),
+  ]);
+  const grouped = groupAndMatch(rows, pairSets.pairs, pairSets.unpairs);
   return c.json({
     days_requested: days,
     day_count: grouped.length,
     total: rows.length,
     days: grouped,
   });
+});
+
+/**
+ * `POST /api/pair` — `{ hc_id, zones_id }` を手動突合に追加。
+ * 同時に unpair を解除するので、誤って解除した auto-pair の復活にも使える。
+ * idempotent (PK 衝突は無視)。
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.post("/api/pair", apiAuth, async (c) => {
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: "invalid_json" }, 400); }
+  if (!body || typeof body !== "object") return c.json({ error: "expected_object" }, 400);
+  const hcId = (body as { hc_id?: unknown }).hc_id;
+  const zonesId = (body as { zones_id?: unknown }).zones_id;
+  if (typeof hcId !== "string" || !hcId) return c.json({ error: "missing_hc_id" }, 400);
+  if (typeof zonesId !== "string" || !zonesId) return c.json({ error: "missing_zones_id" }, 400);
+  await addManualPair(c.env.DB, hcId, zonesId);
+  return c.json({ ok: true, hc_id: hcId, zones_id: zonesId });
+});
+
+/**
+ * `POST /api/pair/delete` — 1 つの pair edge を削除 + unpair に登録。
+ * body: `{ hc_id, zones_id }`、または matched group まるごと解除する場合
+ * `{ hc_ids: [...], zones_ids: [...] }` を送ると全ペア組合せを unpair 化する。
+ */
+app.post("/api/pair/delete", apiAuth, async (c) => {
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: "invalid_json" }, 400); }
+  if (!body || typeof body !== "object") return c.json({ error: "expected_object" }, 400);
+  const single = (body as { hc_id?: unknown; zones_id?: unknown });
+  const group = (body as { hc_ids?: unknown; zones_ids?: unknown });
+  if (Array.isArray(group.hc_ids) && Array.isArray(group.zones_ids)) {
+    const hcIds = group.hc_ids.filter((x): x is string => typeof x === "string" && x.length > 0);
+    const zonesIds = group.zones_ids.filter((x): x is string => typeof x === "string" && x.length > 0);
+    if (hcIds.length === 0 || zonesIds.length === 0) {
+      return c.json({ error: "empty_group" }, 400);
+    }
+    await unpairGroup(c.env.DB, hcIds, zonesIds);
+    return c.json({ ok: true, hc_ids: hcIds, zones_ids: zonesIds });
+  }
+  if (typeof single.hc_id === "string" && typeof single.zones_id === "string") {
+    await removeManualPair(c.env.DB, single.hc_id, single.zones_id);
+    return c.json({ ok: true, hc_id: single.hc_id, zones_id: single.zones_id });
+  }
+  return c.json({ error: "missing_ids" }, 400);
 });
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));

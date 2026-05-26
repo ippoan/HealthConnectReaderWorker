@@ -1056,7 +1056,12 @@ describe("pairHcZones (時刻 overlap で HC × Zones を pair)", () => {
     });
     const items = pairHcZones([hc, z]);
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ type: "matched", overlap_sec: 20 * 60 });
+    const m = items[0] as any;
+    expect(m.type).toBe("matched");
+    expect(m.hcs.map((r: any) => r.id)).toEqual(["hc1"]);
+    expect(m.zoneses.map((r: any) => r.id)).toEqual(["z1"]);
+    expect(m.edges[0].overlap_sec).toBe(20 * 60);
+    expect(m.has_manual).toBe(false);
   });
 
   it("multi-workout per day: each HC gets its best-overlap Zones, sorted by time", () => {
@@ -1101,20 +1106,65 @@ describe("pairHcZones (時刻 overlap で HC × Zones を pair)", () => {
     expect(items).toContainEqual(expect.objectContaining({ type: "zones_only" }));
   });
 
-  it("greedy: when 2 HC sessions overlap same Zone, earliest HC wins", () => {
+  it("2 HC sessions overlap same Zone → 1 matched group (N HC × 1 Zones)", () => {
+    // 旧 greedy では先発 HC のみ matched で後発が hc_only だったが、新
+    // connected-component アルゴリズムでは全 3 nodes が 1 グループに集まる。
+    // (= 複数突合: 同じ Apple Watch session が HC で 2 つに分断記録されたケース)
     const z = baseRow({ id: "z1", source: "zones", start_at: "2026-05-05T10:00:00Z", end_at: "2026-05-05T11:00:00Z" });
     const hcEarly = baseRow({ id: "hc-early", source: "hc", start_at: "2026-05-05T10:00:00Z", end_at: "2026-05-05T10:30:00Z" });
     const hcLate = baseRow({ id: "hc-late", source: "hc", start_at: "2026-05-05T10:31:00Z", end_at: "2026-05-05T11:00:00Z" });
     const items = pairHcZones([hcEarly, hcLate, z]);
-    const early = items.find((it) => "hc" in it && it.hc?.id === "hc-early");
-    const late = items.find((it) => "hc" in it && it.hc?.id === "hc-late");
-    expect(early?.type).toBe("matched");
-    expect(late?.type).toBe("hc_only");
+    expect(items).toHaveLength(1);
+    const m = items[0] as any;
+    expect(m.type).toBe("matched");
+    expect(m.hcs.map((r: any) => r.id).sort()).toEqual(["hc-early", "hc-late"]);
+    expect(m.zoneses.map((r: any) => r.id)).toEqual(["z1"]);
+  });
+
+  it("manual pair: time overlap が無くても明示リンクされた HC × Zones は matched", () => {
+    const hc = baseRow({ id: "hc-x", source: "hc", start_at: "2026-05-06T08:00:00Z", end_at: "2026-05-06T08:30:00Z" });
+    const z = baseRow({ id: "z-y", source: "zones", start_at: "2026-05-06T12:00:00Z", end_at: "2026-05-06T12:30:00Z" });
+    const items = pairHcZones([hc, z], new Set(["hc-x::z-y"]));
+    expect(items).toHaveLength(1);
+    const m = items[0] as any;
+    expect(m.type).toBe("matched");
+    expect(m.has_manual).toBe(true);
+  });
+
+  it("unpair: 時刻 overlap があっても unpair set で抑止される", () => {
+    const hc = baseRow({ id: "hc-1", source: "hc", start_at: "2026-05-07T08:00:00Z", end_at: "2026-05-07T08:30:00Z" });
+    const z = baseRow({ id: "z-1", source: "zones", start_at: "2026-05-07T08:10:00Z", end_at: "2026-05-07T08:20:00Z" });
+    const items = pairHcZones([hc, z], new Set(), new Set(["hc-1::z-1"]));
+    expect(items).toHaveLength(2);
+    expect(items.map((it) => it.type).sort()).toEqual(["hc_only", "zones_only"]);
+  });
+
+  it("複数突合 N:N: 2 HC ↔ 2 Zones を全て manual pair で 1 グループに", () => {
+    const hc1 = baseRow({ id: "hc1", source: "hc", start_at: "2026-05-08T08:00:00Z", end_at: "2026-05-08T08:30:00Z" });
+    const hc2 = baseRow({ id: "hc2", source: "hc", start_at: "2026-05-08T18:00:00Z", end_at: "2026-05-08T18:30:00Z" });
+    const z1 = baseRow({ id: "z1", source: "zones", start_at: "2026-05-08T09:00:00Z", end_at: "2026-05-08T09:30:00Z" });
+    const z2 = baseRow({ id: "z2", source: "zones", start_at: "2026-05-08T19:00:00Z", end_at: "2026-05-08T19:30:00Z" });
+    // hc1-z1 / hc2-z2 はそれぞれ overlap なし、manual pair で繋ぐ
+    // さらに z1-hc2 で全部を 1 group にする
+    const items = pairHcZones([hc1, hc2, z1, z2], new Set([
+      "hc1::z1",
+      "hc2::z2",
+      "hc2::z1",
+    ]));
+    expect(items).toHaveLength(1);
+    const m = items[0] as any;
+    expect(m.type).toBe("matched");
+    expect(m.hcs.length).toBe(2);
+    expect(m.zoneses.length).toBe(2);
+    expect(m.edges.length).toBe(3);
   });
 });
 
 function startAtOfTest(it: any): string {
-  if (it.type === "matched") return it.hc.start_at;
+  if (it.type === "matched") {
+    const all = [...it.hcs, ...it.zoneses].map((r: any) => r.start_at).filter(Boolean).sort();
+    return all[0] ?? "";
+  }
   if (it.type === "hc_only") return it.hc.start_at;
   return it.zones.start_at;
 }
@@ -1185,9 +1235,11 @@ describe("GET /api/workouts (日付別 + 突合)", () => {
     const todayDay = j.days.find((d) => d.date === dateStr);
     expect(todayDay).toBeTruthy();
     expect(todayDay!.matched_count).toBeGreaterThanOrEqual(1);
-    const matchedItem = todayDay!.items.find((it: any) => it.type === "matched" && it.hc.id === "match-hc");
+    const matchedItem: any = todayDay!.items.find(
+      (it: any) => it.type === "matched" && it.hcs.some((h: any) => h.id === "match-hc"),
+    );
     expect(matchedItem).toBeTruthy();
-    expect(matchedItem.zones.id).toBe("match-z");
+    expect(matchedItem.zoneses.map((z: any) => z.id)).toContain("match-z");
   });
 });
 
@@ -1643,6 +1695,86 @@ describe("Auth: JWT cookie path", () => {
   it("401 GET /api/zones without cookie and without Bearer", async () => {
     const r = await app.request("/api/zones", {}, env);
     expect(r.status).toBe(401);
+  });
+});
+
+describe("POST /api/pair (手動突合)", () => {
+  async function seed(date: string) {
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?)",
+    ).bind(
+      "hc-pair-test",
+      "hc",
+      date,
+      `${date}T05:00:00Z`,
+      `${date}T05:30:00Z`,
+      "ランニング",
+      `hc/${date}.json`,
+      new Date().toISOString(),
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?)",
+    ).bind(
+      "z-pair-test",
+      "zones",
+      date,
+      `${date}T15:00:00Z`,   // time が離れている = auto では繋がらない
+      `${date}T15:30:00Z`,
+      "ランニング",
+      `zones/${date}/z-pair-test.json`,
+      new Date().toISOString(),
+    ).run();
+  }
+
+  it("401 without bearer", async () => {
+    const r = await app.request("/api/pair", { method: "POST" }, env);
+    expect(r.status).toBe(401);
+  });
+
+  it("400 on missing ids", async () => {
+    const r = await app.request("/api/pair", {
+      method: "POST",
+      headers: { ...auth(), "Content-Type": "application/json" },
+      body: "{}",
+    }, env);
+    expect(r.status).toBe(400);
+  });
+
+  it("manual pair が auto overlap 無しでも matched にできる + 解除で zones_only/hc_only に戻る", async () => {
+    const date = "2026-09-09";
+    await seed(date);
+
+    // POST /api/pair
+    const r1 = await app.request("/api/pair", {
+      method: "POST",
+      headers: { ...auth(), "Content-Type": "application/json" },
+      body: JSON.stringify({ hc_id: "hc-pair-test", zones_id: "z-pair-test" }),
+    }, env);
+    expect(r1.status).toBe(200);
+
+    const r2 = await app.request("/api/workouts?days=366", { headers: auth() }, env);
+    const j2 = (await r2.json()) as any;
+    const day = j2.days.find((d: any) => d.items.some((it: any) => it.type === "matched" && it.hcs?.some((h: any) => h.id === "hc-pair-test")));
+    expect(day).toBeTruthy();
+    const m = day.items.find((it: any) => it.type === "matched");
+    expect(m.has_manual).toBe(true);
+
+    // 解除
+    const r3 = await app.request("/api/pair/delete", {
+      method: "POST",
+      headers: { ...auth(), "Content-Type": "application/json" },
+      body: JSON.stringify({ hc_id: "hc-pair-test", zones_id: "z-pair-test" }),
+    }, env);
+    expect(r3.status).toBe(200);
+
+    // matched が無くなる (= hc_only / zones_only に戻る、所属日は別の場合もある)
+    const r4 = await app.request("/api/workouts?days=366", { headers: auth() }, env);
+    const j4 = (await r4.json()) as any;
+    const allItems = j4.days.flatMap((d: any) => d.items);
+    const hcItem = allItems.find((it: any) => it.hc?.id === "hc-pair-test");
+    const zItem = allItems.find((it: any) => it.zones?.id === "z-pair-test");
+    expect(hcItem?.type).toBe("hc_only");
+    expect(zItem?.type).toBe("zones_only");
   });
 });
 
