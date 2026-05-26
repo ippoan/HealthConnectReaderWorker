@@ -21,6 +21,8 @@ import { apiAuth, verifyAuthCookie } from "./auth";
 import {
   groupAndMatch,
   hcPayloadToRows,
+  hcSessionId,
+  listKnownHcIds,
   listWorkoutsSinceDays,
   listZonesFromDb,
   upsertWorkout,
@@ -622,6 +624,53 @@ app.get("/api/workout", apiAuth, async (c) => {
     return c.json({ error: "not_found" }, 404);
   }
   return c.json({ hc, zones });
+});
+
+/**
+ * `GET /api/known-hc-ids?days=N` — D1 に既に入っている HC session id 一覧を返す。
+ * Android アプリは readPastDays で得た各 session から同じ規約
+ * (\`hc:<startTime>:<exerciseType>\` の SHA-256 上位 16 hex) で id を計算し、
+ * このリストに含まれないものだけ upload-batch に乗せる「diff upload」用。
+ *
+ * 利点: 「過去 30 日 Upload」を何度押してもネットワーク通信は **新規 session
+ * 分だけ** で完結する。R2 merge 経路と併用すれば二重防御で安全。
+ *
+ * shape: `{ days, count, ids: ["hc_xxxxxxxxxxxxxxxx", ...] }`
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.get("/api/known-hc-ids", apiAuth, async (c) => {
+  const raw = c.req.query("days");
+  let days = 30;
+  if (raw !== undefined) {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 366) days = n;
+    else return c.json({ error: "days_out_of_range" }, 400);
+  }
+  const ids = await listKnownHcIds(c.env.DB, days);
+  return c.json({ days, count: ids.length, ids });
+});
+
+/**
+ * `POST /api/hc-session-id` — Android 側で id 計算をローカル実装するまでの
+ * 暫定 helper。`{ startTime, exerciseType }` を投げると Worker と同じ規約で
+ * 計算した id を返す。Android が SHA-256 を計算できれば不要。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.post("/api/hc-session-id", apiAuth, async (c) => {
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: "invalid_json" }, 400); }
+  if (!body || typeof body !== "object") {
+    return c.json({ error: "expected_object" }, 400);
+  }
+  const startTime = (body as { startTime?: unknown }).startTime;
+  const exerciseType = (body as { exerciseType?: unknown }).exerciseType;
+  if (typeof startTime !== "string") {
+    return c.json({ error: "missing_startTime" }, 400);
+  }
+  const id = await hcSessionId(startTime, exerciseType);
+  return c.json({ id });
 });
 
 app.get("/api/workouts", apiAuth, async (c) => {

@@ -272,7 +272,14 @@ function overlapDistanceMeters(
   return matched > 0 ? Math.round(totalKm * 1000) : null;
 }
 
-async function hcSessionId(
+/**
+ * HC ExerciseSession の D1 row id を組み立てる。
+ * **Worker と Android で完全に同じ規約**: `hc:<startTime>:<exerciseType>` の
+ * SHA-256 上位 16 hex を `hc_` prefix で囲む。
+ * Android 側 (HCBridge.kt) で同じハッシュを計算して /api/known-hc-ids と
+ * 突合することで「未知 session だけ upload」を実現する。Refs #18
+ */
+export async function hcSessionId(
   startAt: string,
   exerciseType: unknown,
 ): Promise<string> {
@@ -330,6 +337,27 @@ export async function listWorkouts(
  * UTC date >= today_utc - days の range で fetch し、グルーピング層で JST 日付
  * を再計算して N 日分に絞り込む。
  */
+/**
+ * 過去 [days] 日分の HC workouts の **id のみ** を取得する (= /api/known-hc-ids 用)。
+ * Android が同じ規約で計算した session id 集合と比較して、未知のものだけ
+ * upload する diff-upload を実現するため。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+export async function listKnownHcIds(
+  db: D1Database,
+  days: number,
+): Promise<string[]> {
+  const since = new Date();
+  since.setUTCDate(since.getUTCDate() - days);
+  const sinceStr = `${since.getUTCFullYear()}-${String(since.getUTCMonth() + 1).padStart(2, "0")}-${String(since.getUTCDate()).padStart(2, "0")}`;
+  const result = await db
+    .prepare(`SELECT id FROM workouts WHERE source = 'hc' AND date >= ? ORDER BY date DESC`)
+    .bind(sinceStr)
+    .all<{ id: string }>();
+  return (result.results ?? []).map((r) => r.id);
+}
+
 export async function listWorkoutsSinceDays(
   db: D1Database,
   days: number,
