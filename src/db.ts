@@ -324,15 +324,19 @@ export async function listWorkouts(
 }
 
 /**
- * 過去 [days] 日分 (= 今日含む UTC) の workouts を date 降順 + start_at 降順で
- * 取得する。1 日 0 件の date は返さない (DB 上に行が無いため)。
+ * 過去 [days] 日分の workouts を取得。**JST 日付基準**で N 日分欲しいが、
+ * DB の `date` 列は UTC 由来なため、JST date と UTC date が最大 1 日ズレる
+ * (= JST 00:00-09:00 の row は UTC で前日扱い)。安全側に 1 日 buffer を取って
+ * UTC date >= today_utc - days の range で fetch し、グルーピング層で JST 日付
+ * を再計算して N 日分に絞り込む。
  */
 export async function listWorkoutsSinceDays(
   db: D1Database,
   days: number,
 ): Promise<WorkoutRow[]> {
   const since = new Date();
-  since.setUTCDate(since.getUTCDate() - (days - 1));
+  // (days - 1) で「今日含む N 日」、+1 日 buffer で JST ↔ UTC のズレ吸収
+  since.setUTCDate(since.getUTCDate() - days);
   const sinceStr = `${since.getUTCFullYear()}-${String(since.getUTCMonth() + 1).padStart(2, "0")}-${String(since.getUTCDate()).padStart(2, "0")}`;
   const stmt = db.prepare(
     `SELECT * FROM workouts WHERE date >= ? ORDER BY date DESC, start_at DESC`,
@@ -440,14 +444,42 @@ function byStartAtAsc(a: WorkoutRow, b: WorkoutRow): number {
 }
 
 /**
+ * `start_at` (UTC ISO) を JST (UTC+9) のカレンダー日付に変換する。
+ * 朝の workout が UTC で前日扱いになる問題を解消するため、表示・マッチング時に
+ * 使う。null / 不正値は null。
+ *
+ * 例: UTC 2026-05-24T20:00:00Z → JST 2026-05-25T05:00 → "2026-05-25"
+ *
+ * 注: TZ は現状 JST 固定。多 TZ 対応する場合は env / cookie / Accept-Language
+ * 由来の offset を受け取るよう拡張する。
+ */
+function jstDateOf(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t + 9 * 3600 * 1000);
+  const yyyy = String(d.getUTCFullYear()).padStart(4, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
  * 日付ごとにグルーピング + マッチング。date 降順で返す。
+ *
+ * グループキーは **start_at を JST に変換した日付** を使う。R2 の hc/{UTC日}.json
+ * key 規約や D1 の `date` 列が UTC ベースなため、user の体感日付 (JST 朝の
+ * workout が UTC で前日扱い) とのズレを表示・突合層で吸収する。
+ *
+ * start_at が無い row だけ DB の `date` 列にフォールバック。
  */
 export function groupAndMatch(rows: WorkoutRow[]): WorkoutDay[] {
   const byDate = new Map<string, WorkoutRow[]>();
   for (const r of rows) {
-    const list = byDate.get(r.date) ?? [];
+    const date = jstDateOf(r.start_at) ?? r.date;
+    const list = byDate.get(date) ?? [];
     list.push(r);
-    byDate.set(r.date, list);
+    byDate.set(date, list);
   }
   const days: WorkoutDay[] = [];
   for (const [date, dayRows] of byDate) {

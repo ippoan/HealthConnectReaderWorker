@@ -508,10 +508,12 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
   <section id="summary" class="bg-white rounded-2xl shadow p-4 text-sm text-slate-700">読込中…</section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
-    <h2 class="font-semibold">速度推移 (HC speeds)</h2>
-    <p id="speed-empty" class="text-xs text-slate-500 hidden">速度サンプル無し</p>
-    <!-- 親 div で高さ固定しないと Chart.js (maintainAspectRatio: false) が
-         resize ループで縦に伸び続ける。h-64 = 16rem 固定 -->
+    <h2 class="font-semibold">速度比較</h2>
+    <p id="speed-empty" class="text-xs text-slate-500 hidden">速度データ無し</p>
+    <p class="text-[10px] text-slate-400">
+      HC 時系列 (端末が記録した場合のみ) + HC 平均 + Zones 平均を重ねて表示。
+      他データ source を増やしたらここに dataset 追加。
+    </p>
     <div class="relative h-64"><canvas id="speed-chart"></canvas></div>
   </section>
 
@@ -566,7 +568,7 @@ async function load() {
   }
   const j = await r.json();
   renderSummary(j);
-  renderSpeedChart(j.hc && j.hc.raw);
+  renderSpeedChart(j);
   renderZonesChart(j.zones && j.zones.raw);
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
 }
@@ -595,50 +597,110 @@ function renderSummary(j) {
   document.getElementById("summary").innerHTML = html.join("") || "(データ無し)";
 }
 
-function renderSpeedChart(hcRaw) {
+// 速度比較 chart: HC 時系列 (端末が記録した場合のみ) + HC 平均 + Zones 平均を
+// 重ねて表示。後で「Zones 時系列」など別 source が増えても dataset を追加する
+// だけで拡張できる構造にしてある。
+function renderSpeedChart(j) {
   const canvas = document.getElementById("speed-chart");
   const empty = document.getElementById("speed-empty");
+  const hcRaw = j.hc && j.hc.raw;
+  const hcRow = j.hc && j.hc.row;
+  const zRow = j.zones && j.zones.row;
+
+  // 1. HC 時系列 samples (= 端末が SpeedRecord に samples[] を入れていれば)
+  const hcPoints = [];
   const speeds = hcRaw && Array.isArray(hcRaw.speeds) ? hcRaw.speeds : [];
-  // すべての samples を平らに集める
-  const points = [];
   for (const s of speeds) {
     if (!s || !Array.isArray(s.samples)) continue;
     for (const sa of s.samples) {
       if (sa && typeof sa.time === "string" && typeof sa.kmh === "number") {
-        points.push({ x: new Date(sa.time).getTime(), y: sa.kmh });
+        hcPoints.push({ x: new Date(sa.time).getTime(), y: sa.kmh });
       }
     }
   }
-  points.sort((a, b) => a.x - b.x);
-  if (points.length === 0) {
+  hcPoints.sort((a, b) => a.x - b.x);
+
+  // 2. HC / Zones 平均速度 (distance_m / duration_sec から)
+  function avg(row) {
+    if (!row || typeof row.distance_m !== "number" || typeof row.duration_sec !== "number" || row.duration_sec <= 0) return null;
+    return (row.distance_m / 1000) / (row.duration_sec / 3600);
+  }
+  const hcAvg = avg(hcRow);
+  const zAvg = avg(zRow);
+
+  // X 軸範囲: HC 時系列が有ればそこから、無ければ workout 期間で平均線を引く
+  let xMin, xMax;
+  if (hcPoints.length > 0) {
+    xMin = hcPoints[0].x;
+    xMax = hcPoints[hcPoints.length - 1].x;
+  } else {
+    const row = hcRow || zRow;
+    if (row && row.start_at && row.end_at) {
+      xMin = Date.parse(row.start_at);
+      xMax = Date.parse(row.end_at);
+    }
+  }
+
+  const datasets = [];
+  if (hcPoints.length > 0) {
+    datasets.push({
+      label: "HC 速度 (時系列)",
+      data: hcPoints.map((p) => ({ x: p.x, y: p.y })),
+      borderColor: "#059669",
+      backgroundColor: "rgba(5,150,105,0.1)",
+      tension: 0.2,
+      pointRadius: 0,
+    });
+  }
+  if (hcAvg !== null && xMin !== undefined) {
+    datasets.push({
+      label: "HC 平均 " + hcAvg.toFixed(2) + " km/h",
+      data: [{ x: xMin, y: hcAvg }, { x: xMax, y: hcAvg }],
+      borderColor: "#10b981",
+      borderDash: [6, 4],
+      pointRadius: 0,
+      borderWidth: 2,
+    });
+  }
+  if (zAvg !== null && xMin !== undefined) {
+    datasets.push({
+      label: "Zones 平均 " + zAvg.toFixed(2) + " km/h",
+      data: [{ x: xMin, y: zAvg }, { x: xMax, y: zAvg }],
+      borderColor: "#6366f1",
+      borderDash: [6, 4],
+      pointRadius: 0,
+      borderWidth: 2,
+    });
+  }
+
+  if (datasets.length === 0) {
     empty.classList.remove("hidden");
     canvas.classList.add("hidden");
     return;
   }
-  const labels = points.map((p) => {
-    const d = new Date(p.x);
-    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
-  });
+
+  // 時刻 X 軸の adapter を入れずに済むよう linear で扱い、tick callback で HH:MM 整形
   new Chart(canvas.getContext("2d"), {
     type: "line",
-    data: {
-      labels,
-      datasets: [{
-        label: "速度 (km/h)",
-        data: points.map((p) => p.y),
-        borderColor: "#059669",
-        backgroundColor: "rgba(5,150,105,0.1)",
-        tension: 0.2,
-        pointRadius: 0,
-      }],
-    },
+    data: { datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
+      parsing: false,
+      plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 10 } } } },
       scales: {
         y: { beginAtZero: true, title: { display: true, text: "km/h" } },
-        x: { ticks: { maxTicksLimit: 8, autoSkip: true } },
+        x: {
+          type: "linear",
+          min: xMin, max: xMax,
+          ticks: {
+            maxTicksLimit: 8,
+            callback: (v) => {
+              const d = new Date(v);
+              return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+            },
+          },
+        },
       },
     },
   });
