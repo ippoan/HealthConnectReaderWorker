@@ -169,6 +169,17 @@ export const INDEX_HTML = `<!doctype html>
     </div>
     <p id="workouts-summary" class="text-xs text-slate-500">読込中…</p>
     <div id="workouts-days-list" class="space-y-2"></div>
+    <div class="border-t border-slate-100 pt-3 space-y-2">
+      <button id="reindex-btn"
+        class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium py-2 rounded-lg">
+        🔄 R2 → D1 を再 index (突合し直す)
+      </button>
+      <p id="reindex-status" class="text-xs text-slate-500 min-h-[1.25rem]"></p>
+      <p class="text-[10px] text-slate-400 leading-snug">
+        R2 に直接置いたデータや、incremental skip で D1 に乗らなかった日を
+        手動で同期する用。upsert なので何度叩いても重複しない。
+      </p>
+    </div>
   </section>
 </div>
 
@@ -390,6 +401,28 @@ function escapeHtml(s) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   return String(s).replace(/[&<>"']/g, (c) => map[c]);
 }
+async function reindexAll() {
+  const btn = $("reindex-btn");
+  const status = $("reindex-status");
+  btn.disabled = true;
+  status.textContent = "再 index 中… (R2 listing + D1 upsert)";
+  const r = await fetch("/_admin/reindex", authFetchInit({ method: "POST" }));
+  btn.disabled = false;
+  if (!r.ok) {
+    const err = await r.text().catch(() => "");
+    status.textContent = "失敗 " + r.status + ": " + err.slice(0, 200);
+    return;
+  }
+  const j = await r.json();
+  status.textContent =
+    "✓ HC " + j.hc_files + " files / " + j.hc_rows + " rows、" +
+    "Zones " + j.zones_files + " files / " + j.zones_rows + " rows" +
+    (j.skipped_total > 0 ? "、skip " + j.skipped_total : "");
+  // history と workouts 両方更新 (D1 が新しい行で埋まったので両方変わる)
+  refreshHistory().catch(() => {});
+  refreshWorkouts().catch(() => {});
+}
+
 async function refreshWorkouts() {
   const days = $("workouts-days").value;
   const summary = $("workouts-summary");
@@ -434,6 +467,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (hasNative) $("auto-toggle").checked = window.HC.isDailyUploadScheduled();
   $("zones-upload-btn").addEventListener("click", uploadZones);
   $("workouts-days").addEventListener("change", () => { refreshWorkouts().catch(() => {}); });
+  $("reindex-btn").addEventListener("click", reindexAll);
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});
   refreshWorkouts().catch(() => {});
