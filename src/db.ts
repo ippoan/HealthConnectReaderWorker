@@ -25,6 +25,8 @@ export interface WorkoutRow {
   active_calories: number | null;   // kcal
   steps: number | null;
   avg_heart_rate: number | null;    // bpm
+  min_heart_rate: number | null;    // bpm (Zones のみ。HC は HR 未読取のため null)
+  max_heart_rate: number | null;    // bpm (Zones のみ。HC は HR 未読取のため null)
   raw_key: string;                  // R2 key
   uploaded_at: string;              // ISO 8601 UTC
 }
@@ -64,6 +66,8 @@ export function zonesPayloadToRow(
     active_calories: pickKcal(payload.activeCalories),
     steps: pickInt(payload.step),
     avg_heart_rate: pickInt(payload.averageHeartRate),
+    min_heart_rate: pickInt(payload.minHeartRate),
+    max_heart_rate: pickInt(payload.maxHeartRate),
     raw_key: rawKey,
     uploaded_at: uploadedAt,
   };
@@ -118,6 +122,8 @@ const COLUMNS = [
   "active_calories",
   "steps",
   "avg_heart_rate",
+  "min_heart_rate",
+  "max_heart_rate",
   "raw_key",
   "uploaded_at",
 ] as const;
@@ -134,6 +140,8 @@ const UPSERT_SQL = `INSERT INTO workouts (${COLUMNS.join(", ")}) VALUES (${PLACE
     active_calories=excluded.active_calories,
     steps=excluded.steps,
     avg_heart_rate=excluded.avg_heart_rate,
+    min_heart_rate=excluded.min_heart_rate,
+    max_heart_rate=excluded.max_heart_rate,
     raw_key=excluded.raw_key,
     uploaded_at=excluded.uploaded_at`;
 
@@ -155,6 +163,8 @@ export async function upsertWorkout(db: D1Database, row: WorkoutRow): Promise<vo
       row.active_calories,
       row.steps,
       row.avg_heart_rate,
+      row.min_heart_rate,
+      row.max_heart_rate,
       row.raw_key,
       row.uploaded_at,
     )
@@ -221,6 +231,8 @@ export async function hcPayloadToRows(
       active_calories: null,
       steps: null,
       avg_heart_rate: null,
+      min_heart_rate: null,
+      max_heart_rate: null,
       raw_key: rawKey,
       uploaded_at: uploadedAt,
     });

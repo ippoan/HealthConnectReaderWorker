@@ -24,6 +24,8 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     active_calories REAL,
     steps INTEGER,
     avg_heart_rate INTEGER,
+    min_heart_rate INTEGER,
+    max_heart_rate INTEGER,
     raw_key TEXT NOT NULL,
     uploaded_at TEXT NOT NULL,
     PRIMARY KEY (source, id)
@@ -50,6 +52,13 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     created_at TEXT NOT NULL,
     PRIMARY KEY (hc_id, zones_id)
   )`,
+  // Zones (iOS HealthKit) workout は raw JSON に min/max HR を持つので
+  // D1 にも保持する。HC 側は現状 HR 未読取 (= permission 未取得) なので NULL のまま。
+  // 既存環境では ALTER TABLE で後付けする (CREATE TABLE 側にも書いてあるので
+  // 新環境では最初から生える)。ALTER 失敗 (= 既に列がある) は無視する。
+  // Refs ippoan/HealthConnectReaderWorker#48 (avg HR backfill)
+  `ALTER TABLE workouts ADD COLUMN min_heart_rate INTEGER`,
+  `ALTER TABLE workouts ADD COLUMN max_heart_rate INTEGER`,
 ];
 
 /**
@@ -60,11 +69,24 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
  */
 export async function applySchema(
   db: D1Database,
-): Promise<{ ran: number; statements: number }> {
+): Promise<{ ran: number; statements: number; skipped: number }> {
   let ran = 0;
+  let skipped = 0;
   for (const sql of SCHEMA_STATEMENTS) {
-    await db.prepare(sql).run();
-    ran++;
+    try {
+      await db.prepare(sql).run();
+      ran++;
+    } catch (err) {
+      // ALTER TABLE ADD COLUMN は SQLite に "IF NOT EXISTS" 構文が無いため、
+      // 2 度目以降の applySchema で "duplicate column name" を返す。これは
+      // 期待された挙動なので silently skip する。それ以外の error は再 throw。
+      const msg = (err as Error).message ?? "";
+      if (sql.includes("ADD COLUMN") && /duplicate column name/i.test(msg)) {
+        skipped++;
+        continue;
+      }
+      throw err;
+    }
   }
-  return { ran, statements: SCHEMA_STATEMENTS.length };
+  return { ran, statements: SCHEMA_STATEMENTS.length, skipped };
 }
