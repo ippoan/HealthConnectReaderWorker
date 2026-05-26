@@ -696,20 +696,20 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
-    <h2 class="font-semibold">心拍 (平均 / max)</h2>
-    <p id="hr-bar-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
+    <h2 class="font-semibold">速度 + 心拍 (合成)</h2>
+    <p id="combined-empty" class="text-xs text-slate-500 hidden">データ無し</p>
     <p class="text-[10px] text-slate-400">
-      各セッションの Zones 平均 / max 心拍を棒で比較表示 (HC は心拍未読取のため
-      平均のみ available な場合は緑棒で表示)。
+      左軸=速度 (km/h, session 別の平均線)、右軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)。
+      心拍・速度ともに session ごとフラットで、session の境界で step 状に変わる。
     </p>
-    <div class="relative h-64"><canvas id="hr-bar-chart"></canvas></div>
+    <div class="relative h-64"><canvas id="combined-chart"></canvas></div>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
     <h2 class="font-semibold">心拍時系列</h2>
     <p id="zones-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
     <p class="text-[10px] text-slate-400">
-      HC 平均心拍 + Zones 平均心拍 + 推定モデルを workout 期間に重ねて表示。
+      HC 平均心拍 + Zones 平均 / max 心拍 + 推定モデルを workout 期間に重ねて表示。
       下のチップ or 凡例タップで個別系列の表示/非表示を切替 (設定は端末に保存)。
     </p>
     <div id="zones-toggles" class="flex flex-wrap gap-1.5"></div>
@@ -798,7 +798,7 @@ async function load() {
   renderSummary(sessions);
   renderSessionChips(sessions);
   renderSpeedChart(sessions);
-  renderHrBarChart(sessions);
+  renderCombinedChart(sessions);
   renderHrChart(sessions);
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
   initPicker();
@@ -881,18 +881,28 @@ function renderSpeedChart(sessions) {
   }
 
   const datasets = [];
-  let xMaxMs = 0;
-  // multi-session の場合は label に prefix を付け、単一なら省略
   const multi = sessions.length > 1;
+
+  // 多 session を X 軸方向に連結する。HC が背中合わせ session に分割記録された
+  // 日 (= 1 実 workout が 4 session として保存) で、4 session を 1 本の経過時間
+  // 軸に並べたい (Refs #52)。
+  const sessDurations = sessions.map((sess) => {
+    const sMs = sessionStartMs(sess);
+    const eMs = sessionEndMs(sess);
+    return sMs ? Math.max(0, eMs - sMs) : 0;
+  });
+  const sessOffsets = [];
+  let cum = 0;
+  for (const d of sessDurations) { sessOffsets.push(cum); cum += d; }
+  const xMaxMs = cum;
 
   sessions.forEach((sess, sIdx) => {
     const color = SESSION_COLORS[sIdx % SESSION_COLORS.length];
     const prefix = multi ? "[" + sessionLabel(sess) + "] " : "";
     const startMs = sessionStartMs(sess);
-    const endMs = sessionEndMs(sess);
     if (!startMs) return;
-    const durMs = Math.max(0, endMs - startMs);
-    if (durMs > xMaxMs) xMaxMs = durMs;
+    const durMs = sessDurations[sIdx];
+    const off = sessOffsets[sIdx];
 
     const hcRaw = sess.hc && sess.hc.raw;
     const hcRow = sess.hc && sess.hc.row;
@@ -908,7 +918,7 @@ function renderSpeedChart(sessions) {
       if (!arr) { arr = []; hcSeriesBySource.set(src, arr); }
       for (const sa of s.samples) {
         if (sa && typeof sa.time === "string" && typeof sa.kmh === "number") {
-          arr.push({ x: new Date(sa.time).getTime() - startMs, y: sa.kmh });
+          arr.push({ x: off + (new Date(sa.time).getTime() - startMs), y: sa.kmh });
         }
       }
     }
@@ -932,7 +942,7 @@ function renderSpeedChart(sessions) {
     if (hcAvg !== null) {
       datasets.push({
         label: prefix + "HC 平均 " + hcAvg.toFixed(2) + " km/h",
-        data: [{ x: 0, y: hcAvg }, { x: durMs, y: hcAvg }],
+        data: [{ x: off, y: hcAvg }, { x: off + durMs, y: hcAvg }],
         borderColor: color,
         pointRadius: 0,
         borderWidth: 2.5,
@@ -941,7 +951,7 @@ function renderSpeedChart(sessions) {
     if (zAvg !== null) {
       datasets.push({
         label: prefix + "Zones 平均 " + zAvg.toFixed(2) + " km/h",
-        data: [{ x: 0, y: zAvg }, { x: durMs, y: zAvg }],
+        data: [{ x: off, y: zAvg }, { x: off + durMs, y: zAvg }],
         borderColor: color,
         borderDash: [6, 4],
         pointRadius: 0,
@@ -956,9 +966,9 @@ function renderSpeedChart(sessions) {
         datasets.push({
           label: prefix + "推定モデル (ramp " + Math.round(tRamp) + "s → 平均で cruise)",
           data: [
-            { x: 0, y: 0 },
-            { x: tRamp * 1000, y: hcAvg },
-            { x: durMs, y: hcAvg },
+            { x: off, y: 0 },
+            { x: off + tRamp * 1000, y: hcAvg },
+            { x: off + durMs, y: hcAvg },
           ],
           borderColor: color,
           borderDash: [2, 3],
@@ -1010,27 +1020,107 @@ function renderSpeedChart(sessions) {
 
 // 心拍時系列 chart: 速度比較と同じ多セッション・経過時間 X 軸構造。
 // 各セッションで HC 平均 (solid 太線) + Zones 平均 (dashed) + 推定モデル (dotted, 非表示) を描く。
-// 心拍バーチャート: 各 session の Zones 平均 / max 心拍を 2 本の棒で並べる。
-// HC は心拍未読取 (Refs #50 - permission scope 制限) のため Zones データのみ使用。
-// Zones avg/max が無い session は棒を出さない (= 全 session 無いなら empty 表示)。
-function renderHrBarChart(sessions) {
-  const canvas = document.getElementById("hr-bar-chart");
-  const empty = document.getElementById("hr-bar-empty");
+// 速度 + 心拍 合成チャート (Refs #52): 1 本の経過時間軸 (X) に
+//   - 左 Y 軸: 心拍 — Zones avg を下弦・max を上弦とする塗り帯 (session ごとフラット)
+//   - 右 Y 軸: 速度 — HC samples 時系列 + HC/Zones 平均
+// HR samples が無い (Zones raw は集約値のみ) ため心拍は session ごとフラット帯。
+function renderCombinedChart(sessions) {
+  const canvas = document.getElementById("combined-chart");
+  const empty = document.getElementById("combined-empty");
 
-  const labels = [];
-  const avgData = [];
-  const maxData = [];
-  sessions.forEach((sess) => {
+  function avg(row) {
+    if (!row || typeof row.distance_m !== "number" || typeof row.duration_sec !== "number" || row.duration_sec <= 0) return null;
+    return (row.distance_m / 1000) / (row.duration_sec / 3600);
+  }
+
+  // 同じ連結オフセット (renderSpeedChart と同じ計算)
+  const sessDurations = sessions.map((sess) => {
+    const sMs = sessionStartMs(sess);
+    const eMs = sessionEndMs(sess);
+    return sMs ? Math.max(0, eMs - sMs) : 0;
+  });
+  const sessOffsets = [];
+  let cum = 0;
+  for (const d of sessDurations) { sessOffsets.push(cum); cum += d; }
+  const xMaxMs = cum;
+
+  const datasets = [];
+  let haveAny = false;
+
+  sessions.forEach((sess, sIdx) => {
+    const startMs = sessionStartMs(sess);
+    if (!startMs) return;
+    const durMs = sessDurations[sIdx];
+    const off = sessOffsets[sIdx];
+
+    const hcRow = sess.hc && sess.hc.row;
     const zRow = sess.zones && sess.zones.row;
-    const avg = zRow && typeof zRow.avg_heart_rate === "number" ? zRow.avg_heart_rate : null;
-    const mx = zRow && typeof zRow.max_heart_rate === "number" ? zRow.max_heart_rate : null;
-    if (avg === null && mx === null) return;
-    labels.push(sessionLabel(sess));
-    avgData.push(avg);
-    maxData.push(mx);
+
+    // 速度 — session ごとの平均を 1 本のフラット線で (off → off+durMs)。
+    // 「session を切るときに速度が step 状に変わる」表現にする (user 要望)。
+    // HC samples 時系列は使わない (合成 chart は粗い俯瞰用)。
+    const hcAvg = avg(hcRow);
+    const zAvg = avg(zRow);
+    const v = hcAvg !== null ? hcAvg : zAvg;
+    if (v !== null) {
+      datasets.push({
+        label: "速度 (km/h)",
+        data: [{ x: off, y: v }, { x: off + durMs, y: v }],
+        borderColor: "#dc2626",
+        borderDash: [6, 3],
+        borderWidth: 1.8,
+        pointRadius: 0,
+        yAxisID: "ySpeed",
+        order: 1,
+        spanGaps: false,
+      });
+      haveAny = true;
+    }
+
+    // 心拍 帯 — Zones avg (下弦) と max (上弦) の塗り (青系、左軸)
+    const zAvgHr = zRow && typeof zRow.avg_heart_rate === "number" ? zRow.avg_heart_rate : null;
+    const zMaxHr = zRow && typeof zRow.max_heart_rate === "number" ? zRow.max_heart_rate : null;
+    if (zAvgHr !== null && zMaxHr !== null) {
+      // 帯を fill で塗るには、max を先に描いて、avg を fill:'-1' で前 dataset まで塗る。
+      // 1 つの "Fill" 単位 (avg → fill:'-1' = max line まで) を session ごとに作る。
+      datasets.push({
+        label: "♥ max (上弦)",
+        data: [{ x: off, y: zMaxHr }, { x: off + durMs, y: zMaxHr }],
+        borderColor: "#3b82f6",
+        borderWidth: 2,
+        pointRadius: 0,
+        yAxisID: "yHr",
+        order: 2,
+        fill: false,
+      });
+      datasets.push({
+        label: "♥ 平均 (下弦)",
+        data: [{ x: off, y: zAvgHr }, { x: off + durMs, y: zAvgHr }],
+        borderColor: "#3b82f6",
+        backgroundColor: "rgba(59, 130, 246, 0.25)",
+        borderWidth: 2,
+        pointRadius: 0,
+        yAxisID: "yHr",
+        order: 2,
+        fill: "-1",
+      });
+      haveAny = true;
+    } else if (zAvgHr !== null) {
+      // max 欠落時は平均のみ
+      datasets.push({
+        label: "♥ 平均",
+        data: [{ x: off, y: zAvgHr }, { x: off + durMs, y: zAvgHr }],
+        borderColor: "#3b82f6",
+        borderWidth: 2,
+        pointRadius: 0,
+        yAxisID: "yHr",
+        order: 2,
+      });
+      haveAny = true;
+    }
   });
 
-  if (labels.length === 0) {
+  if (!haveAny) {
     empty.classList.remove("hidden");
     canvas.classList.add("hidden");
     return;
@@ -1038,45 +1128,51 @@ function renderHrBarChart(sessions) {
   empty.classList.add("hidden");
   canvas.classList.remove("hidden");
 
-  const chart = new Chart(canvas.getContext("2d"), {
-    type: "bar",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "平均",
-          data: avgData,
-          backgroundColor: "#10b981",
-          borderColor: "#059669",
-          borderWidth: 1,
-        },
-        {
-          label: "max",
-          data: maxData,
-          backgroundColor: "#f97316",
-          borderColor: "#ea580c",
-          borderWidth: 1,
-        },
-      ],
-    },
+  new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: { datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      parsing: false,
       plugins: {
-        legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
-        tooltip: {
-          callbacks: {
-            label: (ctx) => ctx.dataset.label + ": ♥" + (ctx.parsed.y ?? "—") + " bpm",
+        legend: {
+          display: true,
+          labels: {
+            boxWidth: 12, font: { size: 10 },
+            // session 別に同じ label が重複するので uniq filter
+            filter: (item, data) => {
+              const seen = data._seen || (data._seen = new Set());
+              if (seen.has(item.text)) return false;
+              seen.add(item.text);
+              return true;
+            },
           },
         },
       },
       scales: {
-        y: { beginAtZero: false, title: { display: true, text: "bpm" } },
+        ySpeed: {
+          type: "linear", position: "left",
+          beginAtZero: true,
+          title: { display: true, text: "速度 (km/h)", color: "#dc2626" },
+          ticks: { color: "#dc2626" },
+        },
+        yHr: {
+          type: "linear", position: "right",
+          beginAtZero: false,
+          title: { display: true, text: "心拍 (bpm)", color: "#3b82f6" },
+          ticks: { color: "#3b82f6" },
+          grid: { drawOnChartArea: false },
+        },
+        x: {
+          type: "linear",
+          min: 0, max: xMaxMs || undefined,
+          title: { display: true, text: "経過時間" },
+          ticks: { maxTicksLimit: 8, callback: (v) => fmtElapsed(v) },
+        },
       },
     },
   });
-  // chart 変数は GC されないよう保持 (Chart.js の internal lifecycle 都合)
-  canvas.__hrBarChart = chart;
 }
 
 function renderHrChart(sessions) {
@@ -1084,27 +1180,36 @@ function renderHrChart(sessions) {
   const empty = document.getElementById("zones-empty");
 
   const datasets = [];
-  let xMaxMs = 0;
   const multi = sessions.length > 1;
+
+  // X 軸方向 連結 (Refs #52)。renderSpeedChart と同じロジック。
+  const sessDurations = sessions.map((sess) => {
+    const sMs = sessionStartMs(sess);
+    const eMs = sessionEndMs(sess);
+    return sMs ? Math.max(0, eMs - sMs) : 0;
+  });
+  const sessOffsets = [];
+  let cum = 0;
+  for (const d of sessDurations) { sessOffsets.push(cum); cum += d; }
+  const xMaxMs = cum;
 
   sessions.forEach((sess, sIdx) => {
     const color = SESSION_COLORS[sIdx % SESSION_COLORS.length];
     const prefix = multi ? "[" + sessionLabel(sess) + "] " : "";
-    const startMs = sessionStartMs(sess);
-    const endMs = sessionEndMs(sess);
-    if (!startMs) return;
-    const durMs = Math.max(0, endMs - startMs);
-    if (durMs > xMaxMs) xMaxMs = durMs;
+    if (!sessionStartMs(sess)) return;
+    const durMs = sessDurations[sIdx];
+    const off = sessOffsets[sIdx];
 
     const hcRow = sess.hc && sess.hc.row;
     const zRow = sess.zones && sess.zones.row;
     const hcHr = hcRow && typeof hcRow.avg_heart_rate === "number" ? hcRow.avg_heart_rate : null;
     const zHr = zRow && typeof zRow.avg_heart_rate === "number" ? zRow.avg_heart_rate : null;
+    const zMax = zRow && typeof zRow.max_heart_rate === "number" ? zRow.max_heart_rate : null;
 
     if (hcHr !== null) {
       datasets.push({
         label: prefix + "HC 平均 ♥" + hcHr + " bpm",
-        data: [{ x: 0, y: hcHr }, { x: durMs, y: hcHr }],
+        data: [{ x: off, y: hcHr }, { x: off + durMs, y: hcHr }],
         borderColor: color,
         pointRadius: 0,
         borderWidth: 2.5,
@@ -1113,11 +1218,21 @@ function renderHrChart(sessions) {
     if (zHr !== null) {
       datasets.push({
         label: prefix + "Zones 平均 ♥" + zHr + " bpm",
-        data: [{ x: 0, y: zHr }, { x: durMs, y: zHr }],
+        data: [{ x: off, y: zHr }, { x: off + durMs, y: zHr }],
         borderColor: color,
         borderDash: [6, 4],
         pointRadius: 0,
         borderWidth: 1.5,
+      });
+    }
+    if (zMax !== null) {
+      datasets.push({
+        label: prefix + "Zones max ♥" + zMax + " bpm",
+        data: [{ x: off, y: zMax }, { x: off + durMs, y: zMax }],
+        borderColor: color,
+        borderDash: [1, 3],
+        pointRadius: 0,
+        borderWidth: 2,
       });
     }
     // 推定モデル: resting (60) → avg ramp → cruise
@@ -1129,9 +1244,9 @@ function renderHrChart(sessions) {
         datasets.push({
           label: prefix + "推定モデル (ramp " + Math.round(tRamp) + "s → 平均で cruise)",
           data: [
-            { x: 0, y: 60 },
-            { x: tRamp * 1000, y: baseHr },
-            { x: durMs, y: baseHr },
+            { x: off, y: 60 },
+            { x: off + tRamp * 1000, y: baseHr },
+            { x: off + durMs, y: baseHr },
           ],
           borderColor: color,
           borderDash: [2, 3],
