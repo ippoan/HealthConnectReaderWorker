@@ -778,7 +778,7 @@ async function load() {
   const qs = new URLSearchParams();
   if (hcIds.some((s) => s)) qs.set("hc", hcIds.join(","));
   if (zIds.some((s) => s)) qs.set("zones", zIds.join(","));
-  const r = await fetch("/api/workout?" + qs.toString(), { credentials: "include" });
+  const r = await workoutFetch("/api/workout?" + qs.toString());
   if (!r.ok) {
     document.getElementById("summary").textContent = "fetch failed (" + r.status + ")";
     return;
@@ -1150,8 +1150,21 @@ function installToggleChips(containerId, chartKey, chart, datasets) {
 }
 
 // ----- セッション picker: /api/workouts から候補を取得し、 -----
-// checkbox で複数選択して「適用」で /workout?hc=...&zones=... を更新 + reload。
+// **グループ単位** で checkbox 表示し、「適用」で /workout?hc=...&zones=... を更新 + reload。
+// matched group は内部の hcs[] / zoneses[] を全部展開する (3 HC × 1 Zones なら 3 セッション)。
 let pickerInitialized = false;
+
+// /workout ページ向け auth fetch: Android WebView は Bearer / browser は cookie。
+function workoutAuthHeaders() {
+  if (typeof window !== "undefined" && window.HC && typeof window.HC.getUploadToken === "function") {
+    return { Authorization: "Bearer " + window.HC.getUploadToken() };
+  }
+  return {};
+}
+function workoutFetch(url) {
+  return fetch(url, { credentials: "include", headers: workoutAuthHeaders() });
+}
+
 function initPicker() {
   if (pickerInitialized) return;
   pickerInitialized = true;
@@ -1168,6 +1181,44 @@ function initPicker() {
   applyBtn.addEventListener("click", applyPicker);
 }
 
+// 各 group を一意 key で識別: matched=hcs/zoneses の全 id を join、hc_only/zones_only=単独 id
+function groupKey(it) {
+  if (it.type === "matched") {
+    const hcIds = (it.hcs || []).map((h) => h.id).sort().join("|");
+    const zIds = (it.zoneses || []).map((z) => z.id).sort().join("|");
+    return "m:" + hcIds + "::" + zIds;
+  }
+  if (it.type === "hc_only") return "h:" + it.hc.id;
+  if (it.type === "zones_only") return "z:" + it.zones.id;
+  return "?";
+}
+
+// group から (hcArr, zArr) を生成 (positional pair、長い方に合わせて pad)
+function expandGroup(it) {
+  const hcArr = [], zArr = [];
+  if (it.type === "matched") {
+    const hcs = (it.hcs || []).map((h) => h.id);
+    const zs = (it.zoneses || []).map((z) => z.id);
+    const n = Math.max(hcs.length, zs.length);
+    for (let i = 0; i < n; i++) { hcArr.push(hcs[i] || ""); zArr.push(zs[i] || ""); }
+  } else if (it.type === "hc_only") {
+    hcArr.push(it.hc.id); zArr.push("");
+  } else if (it.type === "zones_only") {
+    hcArr.push(""); zArr.push(it.zones.id);
+  }
+  return { hcArr, zArr };
+}
+
+// 現在 URL の hcIds / zIds から「最初に当たる group」を逆引き
+function isGroupCurrentlySelected(it) {
+  const { hcArr, zArr } = expandGroup(it);
+  const curHc = new Set(hcIds.filter((s) => s));
+  const curZ = new Set(zIds.filter((s) => s));
+  for (const id of hcArr) if (id && curHc.has(id)) return true;
+  for (const id of zArr) if (id && curZ.has(id)) return true;
+  return false;
+}
+
 async function refreshPicker() {
   const status = document.getElementById("picker-status");
   const list = document.getElementById("picker-days-list");
@@ -1176,55 +1227,57 @@ async function refreshPicker() {
   list.innerHTML = "";
   let j;
   try {
-    const r = await fetch("/api/workouts?days=" + encodeURIComponent(days), { credentials: "include" });
+    const r = await workoutFetch("/api/workouts?days=" + encodeURIComponent(days));
     if (!r.ok) { status.textContent = "fetch failed (" + r.status + ")"; return; }
     j = await r.json();
   } catch (e) { status.textContent = "fetch error: " + e; return; }
 
-  const selectedHc = new Set(hcIds.filter((s) => s));
-  const selectedZ = new Set(zIds.filter((s) => s));
-
   const daysArr = Array.isArray(j.days) ? j.days : [];
-  status.textContent = daysArr.length + " 日 / " + j.total + " workouts";
+  status.textContent = daysArr.length + " 日 / " + j.total + " workouts (グループ単位)";
 
-  // 各 day item に checkbox を出す。item は HC pair / HC only / Zones only の 3 種。
   for (const day of daysArr) {
     const dayHdr = document.createElement("div");
     dayHdr.className = "text-xs font-semibold text-slate-700 mt-2";
-    dayHdr.textContent = day.date + " (" + day.items.length + " items)";
+    dayHdr.textContent = day.date + " (" + day.items.length + " グループ)";
     list.appendChild(dayHdr);
     for (const it of day.items) {
       const row = document.createElement("label");
-      row.className = "flex items-start gap-2 text-[11px] text-slate-700 pl-2 cursor-pointer";
+      row.className = "flex items-start gap-2 text-[11px] text-slate-700 pl-2 cursor-pointer hover:bg-slate-50 rounded px-1";
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.className = "mt-0.5";
-      // pair_id ベース or hc/zones_only でデータ id を抽出
-      const hcId = it.hc ? it.hc.id : (it.hcs && it.hcs[0] ? it.hcs[0].id : null);
-      const zId = it.zones ? it.zones.id : (it.zoneses && it.zoneses[0] ? it.zoneses[0].id : null);
-      cb.dataset.hcId = hcId || "";
-      cb.dataset.zId = zId || "";
-      if ((hcId && selectedHc.has(hcId)) || (zId && selectedZ.has(zId))) {
-        cb.checked = true;
-      }
+      cb.dataset.groupJson = JSON.stringify(it);
+      if (isGroupCurrentlySelected(it)) cb.checked = true;
+
       const txt = document.createElement("span");
-      const hcInfo = it.hc || (it.hcs && it.hcs[0]);
-      const zInfo = it.zones || (it.zoneses && it.zoneses[0]);
-      const parts = [];
-      if (hcInfo) {
-        parts.push("HC " + fmtTime(hcInfo.start_at) + "–" + fmtTime(hcInfo.end_at) +
-                   " " + (hcInfo.activity_name || ""));
-      }
-      if (zInfo) {
-        parts.push("Zones " + fmtTime(zInfo.start_at) + "–" + fmtTime(zInfo.end_at) +
-                   " " + (zInfo.activity_name || ""));
-      }
-      txt.textContent = parts.join(" / ");
+      txt.innerHTML = renderGroupLabel(it);
       row.appendChild(cb);
       row.appendChild(txt);
       list.appendChild(row);
     }
   }
+}
+
+function renderGroupLabel(it) {
+  if (it.type === "matched") {
+    const hcs = it.hcs || [], zs = it.zoneses || [];
+    const first = hcs[0] || zs[0];
+    const tag = '<span class="text-emerald-700">matched ' + hcs.length + 'HC × ' + zs.length + 'Zones</span>';
+    const time = first ? fmtTime(first.start_at) + "–" + fmtTime(first.end_at) : "";
+    const name = first ? escapeHtml(first.activity_name || "") : "";
+    return tag + " " + time + " " + name;
+  }
+  if (it.type === "hc_only") {
+    return '<span class="text-sky-700">HC only</span> ' +
+      fmtTime(it.hc.start_at) + "–" + fmtTime(it.hc.end_at) + " " +
+      escapeHtml(it.hc.activity_name || "");
+  }
+  if (it.type === "zones_only") {
+    return '<span class="text-amber-700">Zones only</span> ' +
+      fmtTime(it.zones.start_at) + "–" + fmtTime(it.zones.end_at) + " " +
+      escapeHtml(it.zones.activity_name || "");
+  }
+  return "?";
 }
 
 function applyPicker() {
@@ -1233,10 +1286,14 @@ function applyPicker() {
   const hcArr = [], zArr = [];
   cbs.forEach((cb) => {
     if (!cb.checked) return;
-    hcArr.push(cb.dataset.hcId || "");
-    zArr.push(cb.dataset.zId || "");
+    let it;
+    try { it = JSON.parse(cb.dataset.groupJson); } catch { return; }
+    const ex = expandGroup(it);
+    for (let i = 0; i < ex.hcArr.length; i++) {
+      hcArr.push(ex.hcArr[i]); zArr.push(ex.zArr[i]);
+    }
   });
-  if (hcArr.length === 0) { alert("セッション未選択"); return; }
+  if (hcArr.length === 0) { alert("グループ未選択"); return; }
   const qs = new URLSearchParams();
   if (hcArr.some((s) => s)) qs.set("hc", hcArr.join(","));
   if (zArr.some((s) => s)) qs.set("zones", zArr.join(","));
