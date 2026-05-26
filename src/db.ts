@@ -641,17 +641,52 @@ export function groupAndMatch(
     const l = zonesByDate.get(d) ?? [];
     l.push(z); zonesByDate.set(d, l);
   }
+  // Manual pair に既に出ている hc / zones は auto 突合の候補から除外する
+  // (manual 側で N:N グループを意図的に作っているケースを潰さない、かつ
+  // 1 つの manual pair が auto 1:1 と重なって連結成分を肥大化させない)。
+  const manualPairedHc = new Set<string>();
+  const manualPairedZones = new Set<string>();
+  for (const key of manualPairs) {
+    const [hcId, zId] = key.split("::");
+    if (!hcId || !zId) continue;
+    if (!hcIds.has(hcId) || !zonesIds.has(zId)) continue;
+    manualPairedHc.add(hcId);
+    manualPairedZones.add(zId);
+  }
+
+  // 貪欲 1:1 bipartite matching: 同日内の全 (hc, z) を overlap 降順に並べ、
+  // 未使用の hc/zones から順に pair を確定する。HC が背中合わせで分割
+  // 記録された日 (= 1 つの Zones が隣接 2 HC と部分 overlap) で、union-find
+  // が全部を 1 mega group にまとめてしまう問題への対処。
+  // Refs ippoan/HealthConnectReaderWorker#50
   for (const [d, dayHcs] of hcsByDate) {
     const dayZones = zonesByDate.get(d) ?? [];
+    type Candidate = { hc: WorkoutRow; z: WorkoutRow; ov: number };
+    const candidates: Candidate[] = [];
     for (const hc of dayHcs) {
+      if (manualPairedHc.has(hc.id)) continue;
       for (const z of dayZones) {
+        if (manualPairedZones.has(z.id)) continue;
         const key = `${hc.id}::${z.id}`;
-        if (manualPairs.has(key)) continue;  // 既に union 済み
         if (unpairs.has(key)) continue;
-        if (overlapSec(hc, z) > 0) {
-          union(nodeId("hc", hc.id), nodeId("zones", z.id));
-        }
+        const ov = overlapSec(hc, z);
+        if (ov > 0) candidates.push({ hc, z, ov });
       }
+    }
+    // overlap_sec 降順 → tie-break は HC start_at 昇順 → Zones start_at 昇順
+    // で決定的にする (テストと UI の表示順を安定させる)。
+    candidates.sort((a, b) =>
+      b.ov - a.ov
+      || (a.hc.start_at ?? "").localeCompare(b.hc.start_at ?? "")
+      || (a.z.start_at ?? "").localeCompare(b.z.start_at ?? ""),
+    );
+    const usedHc = new Set<string>();
+    const usedZ = new Set<string>();
+    for (const c of candidates) {
+      if (usedHc.has(c.hc.id) || usedZ.has(c.z.id)) continue;
+      union(nodeId("hc", c.hc.id), nodeId("zones", c.z.id));
+      usedHc.add(c.hc.id);
+      usedZ.add(c.z.id);
     }
   }
 
