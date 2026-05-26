@@ -476,13 +476,15 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
     <h2 class="font-semibold">速度推移 (HC speeds)</h2>
     <p id="speed-empty" class="text-xs text-slate-500 hidden">速度サンプル無し</p>
-    <canvas id="speed-chart" height="160"></canvas>
+    <!-- 親 div で高さ固定しないと Chart.js (maintainAspectRatio: false) が
+         resize ループで縦に伸び続ける。h-64 = 16rem 固定 -->
+    <div class="relative h-64"><canvas id="speed-chart"></canvas></div>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
     <h2 class="font-semibold">心拍ゾーン (Zones zones)</h2>
     <p id="zones-empty" class="text-xs text-slate-500 hidden">zones 情報無し</p>
-    <canvas id="zones-chart" height="160"></canvas>
+    <div class="relative h-64"><canvas id="zones-chart"></canvas></div>
   </section>
 
   <details class="bg-white rounded-2xl shadow p-4">
