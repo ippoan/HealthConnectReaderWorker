@@ -347,6 +347,91 @@ app.post("/_admin/migrate", apiAuth, async (c) => {
 });
 
 /**
+ * `POST /_admin/reindex` — R2 の hc/ と zones/ を全件 listing し、D1 workouts に
+ * upsert する。HC indexing が後付けで入った (PR #21) ため、それ以前にアップロード
+ * 済みの R2 raw payload を D1 に反映する用途。upsert は idempotent なので何度
+ * 叩いても安全。
+ *
+ * 戻り値:
+ *   { hc_files, hc_rows, zones_files, zones_rows, skipped }
+ * `skipped` は parse 失敗や不正 layout の key リスト (debug 用)。
+ *
+ * 大量データを想定する場合は ?prefix=zones/2026/ のような prefix で範囲を絞る:
+ *   POST /_admin/reindex?prefix=hc/2026/
+ *   POST /_admin/reindex?prefix=zones/
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.post("/_admin/reindex", apiAuth, async (c) => {
+  const prefixFilter = c.req.query("prefix");
+  const uploadedAt = new Date().toISOString();
+  const skipped: Array<{ key: string; reason: string }> = [];
+  let hcFiles = 0, hcRows = 0, zonesFiles = 0, zonesRows = 0;
+
+  // HC
+  if (!prefixFilter || prefixFilter.startsWith("hc/") || prefixFilter === "hc") {
+    const prefix = prefixFilter ?? "hc/";
+    let cursor: string | undefined;
+    do {
+      const page = await c.env.R2.list({ prefix, cursor, limit: 1000 });
+      for (const obj of page.objects) {
+        const m = /^hc\/(\d{4})\/(\d{2})-(\d{2})\.json$/.exec(obj.key);
+        if (!m) { skipped.push({ key: obj.key, reason: "bad_hc_layout" }); continue; }
+        const date = `${m[1]}-${m[2]}-${m[3]}`;
+        const r = await c.env.R2.get(obj.key);
+        if (!r) { skipped.push({ key: obj.key, reason: "r2_get_null" }); continue; }
+        let payload: unknown;
+        try { payload = JSON.parse(await r.text()); }
+        catch { skipped.push({ key: obj.key, reason: "invalid_json" }); continue; }
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          skipped.push({ key: obj.key, reason: "not_object" }); continue;
+        }
+        const rows = await hcPayloadToRows(payload as Record<string, unknown>, obj.key, date, uploadedAt);
+        for (const row of rows) await upsertWorkout(c.env.DB, row);
+        hcFiles++;
+        hcRows += rows.length;
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+
+  // Zones
+  if (!prefixFilter || prefixFilter.startsWith("zones/") || prefixFilter === "zones") {
+    const prefix = prefixFilter ?? "zones/";
+    let cursor: string | undefined;
+    do {
+      const page = await c.env.R2.list({ prefix, cursor, limit: 1000 });
+      for (const obj of page.objects) {
+        const m = /^zones\/(\d{4})\/(\d{2})-(\d{2})\/[^/]+\.json$/.exec(obj.key);
+        if (!m) { skipped.push({ key: obj.key, reason: "bad_zones_layout" }); continue; }
+        const date = `${m[1]}-${m[2]}-${m[3]}`;
+        const r = await c.env.R2.get(obj.key);
+        if (!r) { skipped.push({ key: obj.key, reason: "r2_get_null" }); continue; }
+        let payload: unknown;
+        try { payload = JSON.parse(await r.text()); }
+        catch { skipped.push({ key: obj.key, reason: "invalid_json" }); continue; }
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          skipped.push({ key: obj.key, reason: "not_object" }); continue;
+        }
+        const row = zonesPayloadToRow(payload as Record<string, unknown>, obj.key, date, uploadedAt);
+        await upsertWorkout(c.env.DB, row);
+        zonesFiles++;
+        zonesRows++;
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+
+  return c.json({
+    ok: true,
+    hc_files: hcFiles, hc_rows: hcRows,
+    zones_files: zonesFiles, zones_rows: zonesRows,
+    skipped: skipped.slice(0, 50), // first 50 だけ返す (debug 用 cap)
+    skipped_total: skipped.length,
+  });
+});
+
+/**
  * `GET /api/zones` — Zones workout のアップロード履歴を返す。
  * D1 `workouts` テーブル (source='zones') から uploaded_at desc で取得。
  * shape は従来通り `{ count, items: [{date, uuid, key, uploaded}] }`。
