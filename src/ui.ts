@@ -699,8 +699,8 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
     <h2 class="font-semibold">速度 + 心拍 (合成)</h2>
     <p id="combined-empty" class="text-xs text-slate-500 hidden">データ無し</p>
     <p class="text-[10px] text-slate-400">
-      左軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)、右軸=速度 (km/h, HC 時系列 + 平均)。
-      心拍は時系列 sample が無いので session ごとにフラットな帯になる。
+      左軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)、右軸=速度 (km/h, session 別の平均線)。
+      心拍・速度ともに session ごとフラットで、session の境界で step 状に変わる。
     </p>
     <div class="relative h-64"><canvas id="combined-chart"></canvas></div>
   </section>
@@ -1053,53 +1053,28 @@ function renderCombinedChart(sessions) {
     const durMs = sessDurations[sIdx];
     const off = sessOffsets[sIdx];
 
-    const hcRaw = sess.hc && sess.hc.raw;
     const hcRow = sess.hc && sess.hc.row;
     const zRow = sess.zones && sess.zones.row;
 
-    // 速度 — HC 時系列 samples (赤系破線、右軸)
-    const speeds = hcRaw && Array.isArray(hcRaw.speeds) ? hcRaw.speeds : [];
-    const pts = [];
-    for (const s of speeds) {
-      if (!s || !Array.isArray(s.samples)) continue;
-      for (const sa of s.samples) {
-        if (sa && typeof sa.time === "string" && typeof sa.kmh === "number") {
-          pts.push({ x: off + (new Date(sa.time).getTime() - startMs), y: sa.kmh });
-        }
-      }
-    }
-    pts.sort((a, b) => a.x - b.x);
-    if (pts.length > 0) {
+    // 速度 — session ごとの平均を 1 本のフラット線で (off → off+durMs)。
+    // 「session を切るときに速度が step 状に変わる」表現にする (user 要望)。
+    // HC samples 時系列は使わない (合成 chart は粗い俯瞰用)。
+    const hcAvg = avg(hcRow);
+    const zAvg = avg(zRow);
+    const v = hcAvg !== null ? hcAvg : zAvg;
+    if (v !== null) {
       datasets.push({
         label: "速度 (km/h)",
-        data: pts,
+        data: [{ x: off, y: v }, { x: off + durMs, y: v }],
         borderColor: "#dc2626",
         borderDash: [6, 3],
-        borderWidth: 1.5,
+        borderWidth: 1.8,
         pointRadius: 0,
         yAxisID: "ySpeed",
         order: 1,
-        tension: 0.2,
+        spanGaps: false,
       });
       haveAny = true;
-    } else {
-      // HC samples 無い時は平均速度をフラット線で
-      const hcAvg = avg(hcRow);
-      const zAvg = avg(zRow);
-      const v = hcAvg !== null ? hcAvg : zAvg;
-      if (v !== null) {
-        datasets.push({
-          label: "速度 平均 " + v.toFixed(2) + " km/h",
-          data: [{ x: off, y: v }, { x: off + durMs, y: v }],
-          borderColor: "#dc2626",
-          borderDash: [6, 3],
-          borderWidth: 1.5,
-          pointRadius: 0,
-          yAxisID: "ySpeed",
-          order: 1,
-        });
-        haveAny = true;
-      }
     }
 
     // 心拍 帯 — Zones avg (下弦) と max (上弦) の塗り (青系、左軸)
