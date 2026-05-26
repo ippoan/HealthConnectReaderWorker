@@ -1511,11 +1511,42 @@ describe("GET /api/workout (突合 detail)", () => {
       env,
     );
     expect(r.status).toBe(200);
-    const j = (await r.json()) as { hc: any; zones: any };
+    const j = (await r.json()) as { hc: any; zones: any; sessions: any };
     expect(j.hc.row.id).toBe("detail-hc");
     expect(j.hc.raw.speeds[0].samples.length).toBe(3);
     expect(j.zones.row.id).toBe("detail-z");
     expect(j.zones.raw.zones.zone3.duration.value).toBe(540);
+    // sessions[] にも同じデータが入っている (multi-session 互換)
+    expect(Array.isArray(j.sessions)).toBe(true);
+    expect(j.sessions.length).toBe(1);
+    expect(j.sessions[0].hc.row.id).toBe("detail-hc");
+    expect(j.sessions[0].zones.row.id).toBe("detail-z");
+  });
+
+  it("returns multiple sessions when ids are comma-separated", async () => {
+    // 2 つの HC session を別 date で作る
+    for (const [id, date] of [["multi-hc-1", "2026-06-21"], ["multi-hc-2", "2026-06-22"]] as const) {
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, distance_m, duration_sec, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      ).bind(
+        id, "hc", date,
+        date + "T05:00:00Z", date + "T05:20:00Z",
+        "ランニング", 3000, 1200,
+        "hc/" + date.slice(0, 4) + "/" + date.slice(5) + "-" + id + ".json",
+        new Date().toISOString(),
+      ).run();
+    }
+    const r = await app.request(
+      "/api/workout?hc=multi-hc-1,multi-hc-2",
+      { headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { sessions: any };
+    expect(j.sessions.length).toBe(2);
+    expect(j.sessions[0].hc.row.id).toBe("multi-hc-1");
+    expect(j.sessions[1].hc.row.id).toBe("multi-hc-2");
+    expect(j.sessions[0].zones).toBeNull();
   });
 });
 
