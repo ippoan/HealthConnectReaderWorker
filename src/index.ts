@@ -152,15 +152,27 @@ app.post("/api/upload", apiAuth, async (c) => {
   }
   const { key, yyyy, mmdd } = uploadKeyFor(new Date());
   const date = `${yyyy}-${mmdd}`;
-  await c.env.R2.put(key, raw, {
+  // 「今すぐ Upload」は HC の "today" snapshot を投げてくる。同 key に既に
+  // (= upload-batch でマージ済みの) sessions が入っている場合に丸ごと
+  // 上書きすると既存セッションを消してしまうので、upload-batch と同じ
+  // merge セマンティクスで既存と incoming を id 単位で union する。
+  // Refs ippoan/HealthConnectReaderWorker#18
+  const existing = await c.env.R2.get(key);
+  let toStore: ArrayBuffer | string = raw;
+  let storedPayload: Record<string, unknown> = parsed as Record<string, unknown>;
+  if (existing !== null) {
+    let existingPayload: unknown = null;
+    try { existingPayload = JSON.parse(await existing.text()); } catch { /* corrupt → overwrite */ }
+    if (existingPayload !== null) {
+      const merged = mergeHcPayloads(existingPayload, parsed as Record<string, unknown>);
+      storedPayload = merged;
+      toStore = JSON.stringify(merged);
+    }
+  }
+  await c.env.R2.put(key, toStore, {
     httpMetadata: { contentType: "application/json" },
   });
-  const indexed = await indexHcPayload(
-    c.env.DB,
-    parsed as Record<string, unknown>,
-    key,
-    date,
-  );
+  const indexed = await indexHcPayload(c.env.DB, storedPayload, key, date);
   return c.json({ ok: true, key, date, indexed });
 });
 

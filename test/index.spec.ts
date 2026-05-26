@@ -142,6 +142,42 @@ describe("POST /api/upload", () => {
     expect(obj).not.toBeNull();
     expect(await obj!.text()).toBe(body);
   });
+
+  it("/api/upload merges sessions into existing R2 file (Refs #18)", async () => {
+    // /api/upload は今日 UTC の key に書く。今日のキーを既存ファイルとして仕込み、
+    // 新 incoming が old を消さない (= merge される) ことを確認する。
+    const { key } = uploadKeyFor(new Date());
+    await env.R2.put(key, JSON.stringify({
+      date: "merged-test",
+      sessions: [
+        { startTime: "2026-10-10T01:00:00Z", endTime: "2026-10-10T01:30:00Z", exerciseType: 56 },
+      ],
+      distances: [],
+    }));
+    const incoming = {
+      sessions: [
+        // 新 session 1 つ (異なる startTime → merge で追加)
+        { startTime: "2026-10-10T19:00:00Z", endTime: "2026-10-10T19:30:00Z", exerciseType: 56 },
+      ],
+      distances: [],
+    };
+    const r = await app.request(
+      "/api/upload",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(incoming),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const stored = JSON.parse(await (await env.R2.get(key))!.text());
+    // 2 sessions: 既存 + incoming が共存している
+    expect(stored.sessions.length).toBe(2);
+    const ids = stored.sessions.map((s: any) => s.startTime);
+    expect(ids).toContain("2026-10-10T01:00:00Z");
+    expect(ids).toContain("2026-10-10T19:00:00Z");
+  });
 });
 
 describe("GET /api/history", () => {
