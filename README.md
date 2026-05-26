@@ -143,6 +143,47 @@ PWA を経由せず Zones の共有シートから直接 endpoint を叩く。
 > Token はショートカット定義に直書きされ iCloud リンクで共有すると漏洩するため、
 > リンク共有はせず手元で作成すること。
 
+### C. iCloud リンクで配布する場合 (token を埋めない雛形) — Refs #20
+
+上記 B は token を直書きするため iCloud 共有不可。複数端末 / 他人に配布する
+ためのテンプレ。**初回起動時にだけ user に token を 1 回入力させ、以降は
+ショートカット定義内で持ち回す**方式。
+
+```
+[アクション 1] 値が「true」の場合 — もし [ショートカットの入力 が 値を持つ]
+  [そのまま 2 に進む]
+  → だった場合
+    [テキスト「未認証 — Zones workout を共有から実行してください」を表示]
+    [ショートカットを停止]
+  → でない場合 (= 初回 / token 未設定):
+
+[アクション 2] 辞書 — キー "tok" を [`プロンプトで入力させる`] にバインド
+   (ここで user が UPLOAD_TOKEN を 1 回だけ入力する)
+
+[アクション 3] 「設定で取得」アクション (Shortcut 内 variable に永続) で
+   キー "tok" の値を取得 → 変数 \$TOKEN に保存
+
+[アクション 4] URLの内容を取得
+   URL:           https://hcreader.ippoan.org/api/upload-zones
+   メソッド:      POST
+   ヘッダ:        Authorization = Bearer \$TOKEN
+   本文を要求:    ファイル
+   ファイル:      ショートカットの入力
+```
+
+トレードオフ:
+
+| 項目 | 評価 |
+|---|---|
+| iCloud リンク共有 | ✅ token は埋まらないため安全 |
+| 初回 UX | △ 端末ごとに token 1 回入力 |
+| token rotate 時 | △ ショートカット内 "tok" 変数を編集 |
+| Web Share Target からの直接連携 | ❌ iOS Safari 未対応 (回避不能) |
+
+> 注: iOS Shortcuts は keychain アクセス API を持たないため、token は
+> Shortcut 内の変数として保持される。OS バックアップ (iCloud Backup) には
+> 含まれるが、Shortcut の **iCloud 共有リンク**には含まれない。
+
 ## Run / Deploy
 
 ```sh

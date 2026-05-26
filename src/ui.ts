@@ -186,7 +186,14 @@ async function refreshHistory() {
   const r = await fetch("/api/history", authFetchInit());
   if (!r.ok) { $("history").textContent = "history fetch failed (" + r.status + ")"; return; }
   const j = await r.json();
-  $("history").textContent = j.count + " 件 / 最新: " + (j.latest ?? "なし");
+  // breakdown 互換: 旧 shape (hc 無し) も一応 fallback で動かす
+  const hcCount = j.hc ? j.hc.count : j.count;
+  const hcLatest = j.hc ? j.hc.latest : j.latest;
+  const zonesCount = j.zones ? j.zones.count : 0;
+  const zonesLatest = j.zones ? j.zones.latest : null;
+  $("history").textContent =
+    "HC " + hcCount + " 件 (最新 " + (hcLatest ?? "なし") + ")" +
+    " / Zones " + zonesCount + " 件 (最新 " + (zonesLatest ?? "なし") + ")";
 }
 
 async function refreshZonesList() {

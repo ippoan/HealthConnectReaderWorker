@@ -18,7 +18,12 @@
 import { Hono } from "hono";
 
 import { apiAuth, verifyAuthCookie } from "./auth";
-import { listZonesFromDb, upsertWorkout, zonesPayloadToRow } from "./db";
+import {
+  hcPayloadToRows,
+  listZonesFromDb,
+  upsertWorkout,
+  zonesPayloadToRow,
+} from "./db";
 import { readUploadToken, type AppEnv } from "./env";
 import { applySchema } from "./migrations";
 import {
@@ -117,11 +122,46 @@ app.post("/api/upload", apiAuth, async (c) => {
     return c.json({ error: "invalid_json" }, 400);
   }
   const { key, yyyy, mmdd } = uploadKeyFor(new Date());
+  const date = `${yyyy}-${mmdd}`;
   await c.env.R2.put(key, raw, {
     httpMetadata: { contentType: "application/json" },
   });
-  return c.json({ ok: true, key, date: `${yyyy}-${mmdd}` });
+  const indexed = await indexHcPayload(
+    c.env.DB,
+    parsed as Record<string, unknown>,
+    key,
+    date,
+  );
+  return c.json({ ok: true, key, date, indexed });
 });
+
+/**
+ * HC payload を D1 workouts に upsert する。R2 PUT 後に呼ぶ。
+ * sessions[] を 1 row ずつ並列 upsert。0 件なら skip して 0 を返す。
+ * 個別 upsert 失敗は throw → caller (Hono) で 500 化される。再 upload で
+ * 同じ row が出来るので部分失敗の retry は不要。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+async function indexHcPayload(
+  db: D1Database,
+  payload: Record<string, unknown>,
+  rawKey: string,
+  date: string,
+): Promise<number> {
+  const rows = await hcPayloadToRows(
+    payload,
+    rawKey,
+    date,
+    new Date().toISOString(),
+  );
+  if (rows.length === 0) return 0;
+  // D1 への並列 upsert は workerd 上で row が落ちる race があるため逐次。
+  for (const row of rows) {
+    await upsertWorkout(db, row);
+  }
+  return rows.length;
+}
 
 /**
  * `POST /api/upload-batch` — body: { days: [{ date: "YYYY-MM-DD", payload: <object> }] }
@@ -218,7 +258,17 @@ app.post("/api/upload-batch", apiAuth, async (c) => {
       }),
     ),
   );
-  return c.json({ ok: true, written: plan.length, keys, skipped, force });
+  // D1 indexing: written 分だけ HC payload を sessions[] → workouts row へ展開。
+  // 既に R2 に存在するため skip した day は新しい payload を受け取っていない
+  // (= D1 行も既に入っている前提) ので再 index しない。
+  // D1 への並列 upsert は workerd 上で race 起こすので逐次 await する。
+  let indexed = 0;
+  for (const p of plan) {
+    const payload = JSON.parse(p.body) as Record<string, unknown>;
+    const dateStr = (days[p.index] as { date: string }).date;
+    indexed += await indexHcPayload(c.env.DB, payload, p.key, dateStr);
+  }
+  return c.json({ ok: true, written: plan.length, keys, skipped, force, indexed });
 });
 
 /**

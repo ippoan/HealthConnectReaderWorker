@@ -50,29 +50,75 @@ export function zonesKeyFor(startDate: string, uuid: string): UploadKey | null {
   return { yyyy, mmdd: `${mm}-${dd}`, key: `zones/${yyyy}/${mm}-${dd}/${uuid}.json` };
 }
 
-export interface HistorySummary {
+export interface HistoryBreakdown {
   count: number;
   latest: string | null;
 }
 
+export interface HistorySummary {
+  // 互換性のため top-level の `count` / `latest` は hc + zones 合算で返す。
+  // 新規 caller は `hc` / `zones` の breakdown を見ること。
+  count: number;
+  latest: string | null;
+  hc: HistoryBreakdown;
+  zones: HistoryBreakdown;
+}
+
+/**
+ * R2 全体から hc/ と zones/ 両 prefix を listing し、それぞれの件数と最新日付を
+ * 集計する。`count` / `latest` (top-level) は両者合算で返すが、UI 側 breakdown
+ * 用に `{ hc, zones }` を別途返す。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#19
+ */
 export async function summarizeHistory(bucket: R2Bucket): Promise<HistorySummary> {
+  const [hc, zones] = await Promise.all([
+    listPrefix(bucket, "hc/", hcDateFromKey),
+    listPrefix(bucket, "zones/", zonesDateFromKey),
+  ]);
+  return {
+    count: hc.count + zones.count,
+    latest: maxDate(hc.latest, zones.latest),
+    hc,
+    zones,
+  };
+}
+
+async function listPrefix(
+  bucket: R2Bucket,
+  prefix: string,
+  toDate: (key: string) => string | null,
+): Promise<HistoryBreakdown> {
   let count = 0;
   let latest: string | null = null;
   let cursor: string | undefined;
   do {
-    const page = await bucket.list({ prefix: "hc/", cursor, limit: 1000 });
-    count += page.objects.length;
+    const page = await bucket.list({ prefix, cursor, limit: 1000 });
     for (const obj of page.objects) {
-      const date = dateFromKey(obj.key);
-      if (date && (latest === null || date > latest)) latest = date;
+      const date = toDate(obj.key);
+      if (date === null) continue; // skip 想定外 layout のキー
+      count++;
+      if (latest === null || date > latest) latest = date;
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
   return { count, latest };
 }
 
-function dateFromKey(key: string): string | null {
+function maxDate(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a > b ? a : b;
+}
+
+function hcDateFromKey(key: string): string | null {
   const m = /^hc\/(\d{4})\/(\d{2})-(\d{2})\.json$/.exec(key);
+  if (!m) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}
+
+function zonesDateFromKey(key: string): string | null {
+  const m = /^zones\/(\d{4})\/(\d{2})-(\d{2})\/[^/]+\.json$/.exec(key);
   if (!m) return null;
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
