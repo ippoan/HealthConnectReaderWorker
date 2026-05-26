@@ -313,18 +313,38 @@ app.post("/api/upload-batch", apiAuth, async (c) => {
   //   - merge 結果が existing と同じなら skip (= no_change)
   //   - 異なれば merge 結果を新 body として書き戻す
   if (!force && plan.length > 0) {
-    const heads = await Promise.all(plan.map((p) => c.env.R2.get(p.key)));
+    // Parallel R2 GET の Response をそのまま放置すると Worker runtime が
+    // "stalled HTTP response" として cancel する (concurrent fetch limit)。
+    // map の中で **GET + body 読み + parse まで完了させる** 形にして、配列に
+    // 入る時点で R2 Response は既に消費済みにしておく。
+    type Fetched =
+      | { kind: "missing" }
+      | { kind: "corrupt" }
+      | { kind: "ok"; payload: unknown };
+    const fetched: Fetched[] = await Promise.all(
+      plan.map(async (p): Promise<Fetched> => {
+        const obj = await c.env.R2.get(p.key);
+        if (obj === null) return { kind: "missing" };
+        try {
+          return { kind: "ok", payload: JSON.parse(await obj.text()) };
+        } catch {
+          return { kind: "corrupt" };
+        }
+      }),
+    );
     const filtered: Plan[] = [];
     for (let i = 0; i < plan.length; i++) {
-      const existing = heads[i];
-      if (existing === null) {
+      const f = fetched[i];
+      if (f.kind === "missing") {
         filtered.push(plan[i]);
         continue;
       }
-      // existing が壊れた JSON なら incoming で overwrite (= 安全側)
-      let existingPayload: unknown;
-      try { existingPayload = JSON.parse(await existing.text()); }
-      catch { filtered.push(plan[i]); continue; }
+      if (f.kind === "corrupt") {
+        // 壊れた existing は incoming で overwrite (= 安全側)
+        filtered.push(plan[i]);
+        continue;
+      }
+      const existingPayload = f.payload;
       const incomingPayload = JSON.parse(plan[i].body) as Record<string, unknown>;
       const merged = mergeHcPayloads(existingPayload, incomingPayload);
       // merge 前後で sessions/distances/speeds の **要素数** が変わらなければ
