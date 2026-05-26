@@ -675,6 +675,8 @@ function renderZonesChart(zRaw) {
     }
   }
   if (data.length === 0) { empty.classList.remove("hidden"); canvas.classList.add("hidden"); return; }
+  // 横向き bar: X 軸 = 時間 (min)、Y 軸 = Z1..Z5。
+  // 各ゾーンに費やした時間を視覚的に比較しやすい (Z3 が一番長い等が一目で分かる)。
   new Chart(canvas.getContext("2d"), {
     type: "bar",
     data: { labels, datasets: [{
@@ -683,10 +685,17 @@ function renderZonesChart(zRaw) {
       backgroundColor: COLORS.slice(0, data.length),
     }]},
     options: {
+      indexAxis: "y",
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: { y: { beginAtZero: true, title: { display: true, text: "min" } } },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => ctx.parsed.x + " min" } },
+      },
+      scales: {
+        x: { beginAtZero: true, title: { display: true, text: "min" } },
+        y: { title: { display: false } },
+      },
     },
   });
 }
