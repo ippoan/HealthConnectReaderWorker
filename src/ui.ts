@@ -660,8 +660,9 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
     <p id="speed-empty" class="text-xs text-slate-500 hidden">速度データ無し</p>
     <p class="text-[10px] text-slate-400">
       HC 時系列 (端末が記録した場合のみ) + HC 平均 + Zones 平均を重ねて表示。
-      他データ source を増やしたらここに dataset 追加。
+      下のチップ or 凡例タップで個別系列の表示/非表示を切替できます。
     </p>
+    <div id="speed-toggles" class="flex flex-wrap gap-1.5"></div>
     <div class="relative h-64"><canvas id="speed-chart"></canvas></div>
   </section>
 
@@ -855,7 +856,7 @@ function renderSpeedChart(j) {
   }
 
   // 時刻 X 軸の adapter を入れずに済むよう linear で扱い、tick callback で HH:MM 整形
-  new Chart(canvas.getContext("2d"), {
+  const chart = new Chart(canvas.getContext("2d"), {
     type: "line",
     data: { datasets },
     options: {
@@ -879,6 +880,32 @@ function renderSpeedChart(j) {
       },
     },
   });
+
+  // ----- 系列トグル chip 行 (legend より大きくタップしやすい) -----
+  const togglesEl = document.getElementById("speed-toggles");
+  if (togglesEl) {
+    togglesEl.innerHTML = "";
+    datasets.forEach((ds, idx) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "px-2 py-1 text-[11px] rounded-full border transition";
+      const setStyle = (visible) => {
+        btn.style.borderColor = ds.borderColor;
+        btn.style.color = visible ? "#fff" : ds.borderColor;
+        btn.style.backgroundColor = visible ? ds.borderColor : "#fff";
+        btn.style.opacity = visible ? "1" : "0.55";
+      };
+      setStyle(true);
+      btn.textContent = ds.label;
+      btn.addEventListener("click", () => {
+        const meta = chart.getDatasetMeta(idx);
+        meta.hidden = !meta.hidden;
+        setStyle(!meta.hidden);
+        chart.update();
+      });
+      togglesEl.appendChild(btn);
+    });
+  }
 }
 
 function renderZonesChart(zRaw) {
