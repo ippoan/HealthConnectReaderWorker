@@ -504,7 +504,7 @@ async function refreshWorkouts() {
 
 // matched group をまるごと解除 (data-hc-ids / data-zones-ids JSON 経由)
 async function unpairGroup(hcIds, zonesIds) {
-  if (!confirm(hcIds.length + ' HC × ' + zonesIds.length + ' Zones の突合を解除しますか？\n(以降の自動突合も時刻 overlap で再リンクされません)')) return;
+  if (!confirm(hcIds.length + ' HC × ' + zonesIds.length + ' Zones の突合を解除しますか？')) return;
   const r = await fetch("/api/pair/delete", authFetchInit({
     method: "POST",
     headers: { "Content-Type": "application/json" },
