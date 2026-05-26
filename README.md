@@ -220,3 +220,4 @@ Secret は CF Secrets Store に投入後、wrangler が binding 解決する:
 - 作業 branch は `main` から短命に切る (例 `claude/<topic>-<sha>`)
 - PR description / commit message では `Refs #N` を使う
   (`Closes` / `Fixes` は auto-close 衝突のため禁止)
+# CI trigger test
