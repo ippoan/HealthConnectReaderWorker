@@ -1147,6 +1147,99 @@ describe("groupAndMatch", () => {
   });
 });
 
+describe("POST /_admin/reindex", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request("/_admin/reindex", { method: "POST" }, env);
+    expect(r.status).toBe(401);
+  });
+
+  it("backfills D1 workouts from existing R2 hc/ and zones/ payloads", async () => {
+    // 既存 R2 に payload を仕込む (PR #21 以前にアップロードされたデータの想定)
+    const hcPayload = {
+      date: "2026-03-15",
+      sessions: [{
+        startTime: "2026-03-15T08:00:00Z",
+        endTime: "2026-03-15T08:30:00Z",
+        exerciseType: 56,
+        title: null,
+        source: "x",
+      }],
+      distances: [{
+        startTime: "2026-03-15T08:00:00Z",
+        endTime: "2026-03-15T08:30:00Z",
+        km: 5.0,
+        source: "x",
+      }],
+    };
+    await env.R2.put("hc/2026/03-15.json", JSON.stringify(hcPayload));
+
+    const zonesPayload = {
+      uuid: "FFFFFFFF-1111-2222-3333-444444444444",
+      startDate: "2026-03-15T08:05:00Z",
+      endDate: "2026-03-15T08:28:00Z",
+      name: "ランニング",
+      distance: { value: 4.8, unit: "km" },
+      averageHeartRate: { value: 160, unit: "bpm" },
+    };
+    await env.R2.put(
+      "zones/2026/03-15/FFFFFFFF-1111-2222-3333-444444444444.json",
+      JSON.stringify(zonesPayload),
+    );
+
+    // 想定外 layout の key (skip されるべき)
+    await env.R2.put("hc/2026/03/15/wrong.json", "{}");
+    await env.R2.put("zones/garbage.json", "{}");
+
+    const r = await app.request(
+      "/_admin/reindex",
+      { method: "POST", headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as {
+      ok: boolean;
+      hc_files: number; hc_rows: number;
+      zones_files: number; zones_rows: number;
+      skipped_total: number;
+    };
+    expect(j.ok).toBe(true);
+    expect(j.hc_files).toBeGreaterThanOrEqual(1);
+    expect(j.hc_rows).toBeGreaterThanOrEqual(1);
+    expect(j.zones_files).toBeGreaterThanOrEqual(1);
+    expect(j.zones_rows).toBeGreaterThanOrEqual(1);
+    expect(j.skipped_total).toBeGreaterThanOrEqual(2); // bad-layout keys
+
+    // 実際に D1 に row が入って /api/workouts で突合できることを確認
+    const wr = await app.request(
+      "/api/workouts?days=365",
+      { headers: auth() },
+      env,
+    );
+    const wj = (await wr.json()) as { days: Array<{ date: string; matched_count: number }> };
+    const day = wj.days.find((d) => d.date === "2026-03-15");
+    expect(day).toBeTruthy();
+    expect(day!.matched_count).toBe(1);
+  });
+
+  it("scope filter: prefix=zones/ だけ走らせると hc は触らない", async () => {
+    await env.R2.put(
+      "zones/2026/04-01/AAAAAAAA-0000-0000-0000-000000000000.json",
+      JSON.stringify({
+        uuid: "AAAAAAAA-0000-0000-0000-000000000000",
+        startDate: "2026-04-01T07:00:00Z",
+      }),
+    );
+    const r = await app.request(
+      "/_admin/reindex?prefix=zones/",
+      { method: "POST", headers: auth() },
+      env,
+    );
+    const j = (await r.json()) as { hc_files: number; zones_files: number };
+    expect(j.hc_files).toBe(0);
+    expect(j.zones_files).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("Auth: JWT cookie path", () => {
   // HS256 sign helper (test only)
   async function signJwt(payload: Record<string, unknown>, secret: string): Promise<string> {
