@@ -324,6 +324,147 @@ export async function listWorkouts(
 }
 
 /**
+ * 過去 [days] 日分 (= 今日含む UTC) の workouts を date 降順 + start_at 降順で
+ * 取得する。1 日 0 件の date は返さない (DB 上に行が無いため)。
+ */
+export async function listWorkoutsSinceDays(
+  db: D1Database,
+  days: number,
+): Promise<WorkoutRow[]> {
+  const since = new Date();
+  since.setUTCDate(since.getUTCDate() - (days - 1));
+  const sinceStr = `${since.getUTCFullYear()}-${String(since.getUTCMonth() + 1).padStart(2, "0")}-${String(since.getUTCDate()).padStart(2, "0")}`;
+  const stmt = db.prepare(
+    `SELECT * FROM workouts WHERE date >= ? ORDER BY date DESC, start_at DESC`,
+  );
+  const result = await stmt.bind(sinceStr).all<WorkoutRow>();
+  return result.results ?? [];
+}
+
+/**
+ * `/api/workouts` の 1 アイテム。3 種:
+ * - `matched`: HC と Zones が時刻 overlap で対応した
+ * - `hc_only`: HC session のみ (= Apple Watch 未装着 or Zones 未 upload)
+ * - `zones_only`: Zones workout のみ (= 端末未同期 / HC 未 upload)
+ */
+export type WorkoutMatchItem =
+  | { type: "matched"; hc: WorkoutRow; zones: WorkoutRow; overlap_sec: number }
+  | { type: "hc_only"; hc: WorkoutRow }
+  | { type: "zones_only"; zones: WorkoutRow };
+
+export interface WorkoutDay {
+  date: string;
+  hc_count: number;
+  zones_count: number;
+  matched_count: number;
+  items: WorkoutMatchItem[];
+}
+
+/**
+ * 1 日分の rows を HC × Zones で greedy ペアリング。
+ *
+ * - 同日でも start_at の Z (UTC) 時刻区間が overlap しない場合は別 workout 扱い
+ * - HC を start_at 昇順で走査し、各 HC に対して overlap_sec が最大の未使用
+ *   Zones を 1 つ割り当てる。残り Zones は zones_only として出す
+ * - start_at / end_at が null の row は overlap 判定不能なので **常に _only** 扱い
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+export function pairHcZones(rows: WorkoutRow[]): WorkoutMatchItem[] {
+  const hcAll = rows.filter((r) => r.source === "hc");
+  const zonesAll = rows.filter((r) => r.source === "zones");
+  // start_at 昇順で安定 (DESC fetch を引っくり返す)
+  const hcs = [...hcAll].sort(byStartAtAsc);
+  const remainingZones = new Set(zonesAll);
+  const items: WorkoutMatchItem[] = [];
+
+  for (const hc of hcs) {
+    if (hc.start_at === null || hc.end_at === null) {
+      items.push({ type: "hc_only", hc });
+      continue;
+    }
+    const hcStart = Date.parse(hc.start_at);
+    const hcEnd = Date.parse(hc.end_at);
+    if (Number.isNaN(hcStart) || Number.isNaN(hcEnd)) {
+      items.push({ type: "hc_only", hc });
+      continue;
+    }
+    let best: WorkoutRow | null = null;
+    let bestOverlap = 0;
+    for (const z of remainingZones) {
+      if (z.start_at === null || z.end_at === null) continue;
+      const zs = Date.parse(z.start_at);
+      const ze = Date.parse(z.end_at);
+      if (Number.isNaN(zs) || Number.isNaN(ze)) continue;
+      const overlap = Math.max(0, Math.min(hcEnd, ze) - Math.max(hcStart, zs));
+      if (overlap > bestOverlap) {
+        best = z;
+        bestOverlap = overlap;
+      }
+    }
+    if (best) {
+      items.push({
+        type: "matched",
+        hc,
+        zones: best,
+        overlap_sec: Math.round(bestOverlap / 1000),
+      });
+      remainingZones.delete(best);
+    } else {
+      items.push({ type: "hc_only", hc });
+    }
+  }
+  for (const z of remainingZones) {
+    items.push({ type: "zones_only", zones: z });
+  }
+  // 全アイテムを start_at 昇順で並び替え (1 日に複数 workout がある時、
+  // matched / hc_only / zones_only を区別せず時系列で読めるようにする)。
+  items.sort((a, b) => {
+    const av = startAtOf(a);
+    const bv = startAtOf(b);
+    return av < bv ? -1 : av > bv ? 1 : 0;
+  });
+  return items;
+}
+
+function startAtOf(it: WorkoutMatchItem): string {
+  if (it.type === "matched") return it.hc.start_at ?? "";
+  if (it.type === "hc_only") return it.hc.start_at ?? "";
+  return it.zones.start_at ?? "";
+}
+
+function byStartAtAsc(a: WorkoutRow, b: WorkoutRow): number {
+  const av = a.start_at ?? "";
+  const bv = b.start_at ?? "";
+  return av < bv ? -1 : av > bv ? 1 : 0;
+}
+
+/**
+ * 日付ごとにグルーピング + マッチング。date 降順で返す。
+ */
+export function groupAndMatch(rows: WorkoutRow[]): WorkoutDay[] {
+  const byDate = new Map<string, WorkoutRow[]>();
+  for (const r of rows) {
+    const list = byDate.get(r.date) ?? [];
+    list.push(r);
+    byDate.set(r.date, list);
+  }
+  const days: WorkoutDay[] = [];
+  for (const [date, dayRows] of byDate) {
+    const items = pairHcZones(dayRows);
+    days.push({
+      date,
+      hc_count: dayRows.filter((r) => r.source === "hc").length,
+      zones_count: dayRows.filter((r) => r.source === "zones").length,
+      matched_count: items.filter((it) => it.type === "matched").length,
+      items,
+    });
+  }
+  days.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  return days;
+}
+
+/**
  * D1 から Zones (source='zones') 一覧を新しい順に取得。
  * `/api/zones` の表示は引き続き `{date, uuid, key, uploaded}` shape を返すので、
  * 既存の `ZonesListItem` 型を使い回す。

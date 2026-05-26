@@ -19,7 +19,9 @@ import { Hono } from "hono";
 
 import { apiAuth, verifyAuthCookie } from "./auth";
 import {
+  groupAndMatch,
   hcPayloadToRows,
+  listWorkoutsSinceDays,
   listZonesFromDb,
   upsertWorkout,
   zonesPayloadToRow,
@@ -352,6 +354,31 @@ app.post("/_admin/migrate", apiAuth, async (c) => {
 app.get("/api/zones", apiAuth, async (c) => {
   const items = await listZonesFromDb(c.env.DB);
   return c.json({ count: items.length, items });
+});
+
+/**
+ * `GET /api/workouts?days=N` — 直近 N 日分の workouts を日付ごとに HC × Zones で
+ * pairing して返す。`days` 既定 30、最大 366。各日 `items[]` は
+ * `matched` / `hc_only` / `zones_only` のいずれか。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.get("/api/workouts", apiAuth, async (c) => {
+  const raw = c.req.query("days");
+  let days = 30;
+  if (raw !== undefined) {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 366) days = n;
+    else return c.json({ error: "days_out_of_range" }, 400);
+  }
+  const rows = await listWorkoutsSinceDays(c.env.DB, days);
+  const grouped = groupAndMatch(rows);
+  return c.json({
+    days_requested: days,
+    day_count: grouped.length,
+    total: rows.length,
+    days: grouped,
+  });
 });
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
