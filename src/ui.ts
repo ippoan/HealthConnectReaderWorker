@@ -516,7 +516,8 @@ async function unpairGroup(hcIds, zonesIds) {
 
 // 候補一覧を出して 1 つ選ばせて pair 追加
 function openLinkPicker(side, id) {
-  // side: "hc" or "zones" — 自分側。候補は反対側 + matched group 内も含む
+  // side: "hc" (= clicked on hc_only) → 候補 = Zones (zones_only + 突合中 Zones)
+  // side: "zones" (= clicked on zones_only) → 候補 = HC (hc_only + 突合中 HC)
   if (!workoutsCache) return;
   const candidates = [];
   for (const day of workoutsCache.days) {
@@ -531,16 +532,24 @@ function openLinkPicker(side, id) {
       }
     }
   }
-  if (candidates.length === 0) { alert("候補なし"); return; }
+  // 同じ workout 候補が近い時刻にあるはずなので、日付 desc → 時刻 asc で sort
+  candidates.sort((a, b) => {
+    if (a.day !== b.day) return a.day < b.day ? 1 : -1;
+    const av = a.row.start_at ?? "";
+    const bv = b.row.start_at ?? "";
+    return av < bv ? -1 : av > bv ? 1 : 0;
+  });
+  if (candidates.length === 0) { alert("リンクできる候補がありません"); return; }
   // モーダル DOM 構築
+  const targetLabel = side === "hc" ? "Zones (⌚)" : "HC (🏃)";
   const wrap = document.createElement("div");
   wrap.className = "fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50 p-2";
   wrap.innerHTML = '<div class="bg-white w-full max-w-md rounded-2xl p-4 max-h-[80vh] overflow-auto">'
     + '<div class="flex items-center justify-between mb-2">'
-    + '<h3 class="font-semibold">' + (side === "hc" ? "HC ← Zones" : "Zones ← HC") + ' を選択</h3>'
+    + '<h3 class="font-semibold">リンク先の ' + targetLabel + ' を選択</h3>'
     + '<button id="pick-cancel" class="text-sm text-slate-500">閉じる</button>'
     + '</div>'
-    + '<p class="text-[10px] text-slate-400 mb-2">既に突合中の Zones/HC を選ぶと、そのグループに合流します。</p>'
+    + '<p class="text-[10px] text-slate-500 mb-2">候補 ' + candidates.length + ' 件。タップで即リンク。突合中を選ぶとそのグループに合流します。</p>'
     + '<ul id="pick-list" class="space-y-1"></ul>'
     + '</div>';
   document.body.appendChild(wrap);
