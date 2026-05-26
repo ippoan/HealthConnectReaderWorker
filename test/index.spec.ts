@@ -178,6 +178,54 @@ describe("POST /api/upload", () => {
     expect(ids).toContain("2026-10-10T01:00:00Z");
     expect(ids).toContain("2026-10-10T19:00:00Z");
   });
+
+  it("uses payload.date for the R2 key (JST 朝の前日書込を防ぐ, Refs #48)", async () => {
+    // Android が JST `LocalDate.now()` で生成した `date` field を最優先する。
+    // UTC 朝でも payload.date="2026-05-27" なら hc/2026/05-27.json に書かれる
+    // (UTC fallback の今日 key にはならない) ことを確認。
+    const body = JSON.stringify({
+      date: "2026-05-27",
+      sessions: [],
+      distances: [],
+    });
+    const r = await app.request(
+      "/api/upload",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body,
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; key: string; date: string };
+    expect(j.key).toBe("hc/2026/05-27.json");
+    expect(j.date).toBe("2026-05-27");
+  });
+
+  it("falls back to UTC new Date() when payload.date is missing/invalid (Refs #48)", async () => {
+    // payload に date 欠落 → uploadKeyFor(new Date()) (UTC) に fallback。
+    // 不正値 ("bad" / "2026-13-99") も同じ fallback パス。
+    const todayKey = uploadKeyFor(new Date()).key;
+    for (const body of [
+      JSON.stringify({ sessions: [], distances: [] }),
+      JSON.stringify({ date: "bad", sessions: [], distances: [] }),
+      JSON.stringify({ date: "2026-13-99", sessions: [], distances: [] }),
+    ]) {
+      const r = await app.request(
+        "/api/upload",
+        {
+          method: "POST",
+          headers: { ...auth(), "Content-Type": "application/json" },
+          body,
+        },
+        env,
+      );
+      expect(r.status).toBe(200);
+      const j = (await r.json()) as { key: string };
+      expect(j.key).toBe(todayKey);
+    }
+  });
 });
 
 describe("GET /api/history", () => {
