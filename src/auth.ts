@@ -1,6 +1,12 @@
 import type { Context, MiddlewareHandler } from "hono";
 
-import { ALLOWED_EMAILS, readUploadToken, type AppEnv, type Env } from "./env";
+import {
+  ALLOWED_EMAILS,
+  readJwtSecret,
+  readUploadToken,
+  type AppEnv,
+  type Env,
+} from "./env";
 import { getAuthCookieFromHeader, verifyJwt } from "./jwt";
 
 /**
@@ -52,7 +58,7 @@ export async function verifyAuthCookie(
 ): Promise<boolean> {
   const jwt = getAuthCookieFromHeader(cookieHeader);
   if (!jwt) return false;
-  const secret = env.JWT_SECRET;
+  const secret = await readJwtSecret(env);
   if (!secret) return false;
   const payload = await verifyJwt(jwt, secret);
   if (!payload) return false;
