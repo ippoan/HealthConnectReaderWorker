@@ -143,20 +143,39 @@ describe("GET /api/history", () => {
     expect(r.status).toBe(401);
   });
 
-  it("counts and surfaces latest after uploads", async () => {
+  it("counts and surfaces latest after uploads (hc + zones breakdown)", async () => {
     await env.R2.put("hc/2026/05/05-20.json", "{}"); // wrong layout, ignored
     await env.R2.put("hc/2026/05-20.json", "{}");
     await env.R2.put("hc/2026/05-22.json", "{}");
     await env.R2.put("hc/2025/12-31.json", "{}");
+    await env.R2.put(
+      "zones/2026/05-23/AAAAAAAA-1111-2222-3333-444444444444.json",
+      "{}",
+    );
+    await env.R2.put(
+      "zones/2026/05-23/BBBBBBBB-5555-6666-7777-888888888888.json",
+      "{}",
+    );
+    await env.R2.put("zones/garbage-layout.json", "{}"); // wrong layout, ignored
     const r = await app.request(
       "/api/history",
       { headers: auth() },
       env,
     );
     expect(r.status).toBe(200);
-    const j = (await r.json()) as { count: number; latest: string | null };
-    expect(j.count).toBeGreaterThanOrEqual(3);
-    expect(j.latest).toBe("2026-05-22");
+    const j = (await r.json()) as {
+      count: number;
+      latest: string | null;
+      hc: { count: number; latest: string | null };
+      zones: { count: number; latest: string | null };
+    };
+    expect(j.hc.count).toBeGreaterThanOrEqual(3);
+    expect(j.hc.latest).toBe("2026-05-22");
+    expect(j.zones.count).toBeGreaterThanOrEqual(2);
+    expect(j.zones.latest).toBe("2026-05-23");
+    // top-level は合算で、latest は最大値 (Zones の方が新しい)
+    expect(j.count).toBe(j.hc.count + j.zones.count);
+    expect(j.latest).toBe("2026-05-23");
   });
 });
 
@@ -336,16 +355,17 @@ describe("POST /api/upload-batch", () => {
 });
 
 describe("summarizeHistory", () => {
-  it("returns { count: 0, latest: null } on empty bucket", async () => {
-    // Use a fresh-ish view: list existing then drop is overkill — instead
-    // assert against a derived empty case via the function directly with a
-    // miniflare-style stub would need its own bucket. We instead just check
-    // that latest stays null when no matching keys exist.
+  it("returns empty breakdown on empty bucket", async () => {
     const fakeBucket: R2Bucket = {
       list: async () => ({ objects: [], truncated: false, delimitedPrefixes: [] }) as never,
     } as unknown as R2Bucket;
     const out = await summarizeHistory(fakeBucket);
-    expect(out).toEqual({ count: 0, latest: null });
+    expect(out).toEqual({
+      count: 0,
+      latest: null,
+      hc: { count: 0, latest: null },
+      zones: { count: 0, latest: null },
+    });
   });
 });
 
