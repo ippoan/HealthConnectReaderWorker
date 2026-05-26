@@ -165,6 +165,54 @@ app.post("/api/upload", apiAuth, async (c) => {
 });
 
 /**
+ * existing R2 HC payload と incoming HC payload を merge する pure function。
+ * sessions[] / distances[] / speeds[] を **id 同等性** で unique 化:
+ *   - sessions: `startTime + "::" + exerciseType`
+ *   - distances: `startTime + "::" + endTime`
+ *   - speeds:    `startTime + "::" + endTime`
+ *
+ * 同 id があれば incoming を優先 (新しい source / title 更新が反映される)。
+ * top-level field (date / collectedAt 等) は incoming を優先。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+interface MergedHcPayload extends Record<string, unknown> {
+  sessions: unknown[];
+  distances: unknown[];
+  speeds: unknown[];
+}
+
+function mergeHcPayloads(
+  existing: unknown,
+  incoming: Record<string, unknown>,
+): MergedHcPayload {
+  const e = (existing && typeof existing === "object" && !Array.isArray(existing))
+    ? existing as Record<string, unknown>
+    : {};
+  return {
+    ...e,
+    ...incoming,
+    sessions: mergeByKey(e.sessions, incoming.sessions, (s) =>
+      `${(s as { startTime?: unknown }).startTime}::${(s as { exerciseType?: unknown }).exerciseType}`),
+    distances: mergeByKey(e.distances, incoming.distances, (d) =>
+      `${(d as { startTime?: unknown }).startTime}::${(d as { endTime?: unknown }).endTime}`),
+    speeds: mergeByKey(e.speeds, incoming.speeds, (s) =>
+      `${(s as { startTime?: unknown }).startTime}::${(s as { endTime?: unknown }).endTime}`),
+  };
+}
+
+function mergeByKey(
+  existing: unknown,
+  incoming: unknown,
+  keyFn: (x: unknown) => string,
+): unknown[] {
+  const map = new Map<string, unknown>();
+  if (Array.isArray(existing)) for (const x of existing) map.set(keyFn(x), x);
+  if (Array.isArray(incoming)) for (const x of incoming) map.set(keyFn(x), x); // incoming 優先
+  return [...map.values()];
+}
+
+/**
  * HC payload を D1 workouts に upsert する。R2 PUT 後に呼ぶ。
  * sessions[] を 1 row ずつ並列 upsert。0 件なら skip して 0 を返す。
  * 個別 upsert 失敗は throw → caller (Hono) で 500 化される。再 upload で
@@ -253,27 +301,58 @@ app.post("/api/upload-batch", apiAuth, async (c) => {
     plan.push({ index: i, key: k.key, body: JSON.stringify(payload) });
   }
 
-  // Phase 2: in incremental mode (= !force), drop entries whose key already
-  // exists in R2. We `head()` in parallel; non-existent returns null.
+  // Phase 2: in incremental mode (= !force), MERGE incoming sessions/distances/
+  // speeds into the existing R2 payload. これは「ファイル存在チェック」だけだと
+  // Health Connect が後から sync した新しい session が R2 に届かない問題
+  // (Refs #18 / R2: 5/26 朝 HC が hc/2026/05-25.json に反映されない) を解消する。
+  //
+  // 動作:
+  //   - existing R2 payload を fetch → JSON parse
+  //   - sessions[] / distances[] / speeds[] を id (startTime+...) で unique 化して
+  //     incoming と merge
+  //   - merge 結果が existing と同じなら skip (= no_change)
+  //   - 異なれば merge 結果を新 body として書き戻す
   if (!force && plan.length > 0) {
-    const heads = await Promise.all(plan.map((p) => c.env.R2.head(p.key)));
+    const heads = await Promise.all(plan.map((p) => c.env.R2.get(p.key)));
     const filtered: Plan[] = [];
     for (let i = 0; i < plan.length; i++) {
-      if (heads[i] === null) {
+      const existing = heads[i];
+      if (existing === null) {
         filtered.push(plan[i]);
-      } else {
-        skipped.push({ index: plan[i].index, reason: "already_exists", key: plan[i].key });
+        continue;
       }
+      // existing が壊れた JSON なら incoming で overwrite (= 安全側)
+      let existingPayload: unknown;
+      try { existingPayload = JSON.parse(await existing.text()); }
+      catch { filtered.push(plan[i]); continue; }
+      const incomingPayload = JSON.parse(plan[i].body) as Record<string, unknown>;
+      const merged = mergeHcPayloads(existingPayload, incomingPayload);
+      // merge 前後で sessions/distances/speeds の **要素数** が変わらなければ
+      // 新しい session/distance/speed は来ていないので skip (= no_change)。
+      // top-level の date 等のメタ変化や同 id の内容差し替えは write しない
+      // (= efficient だが title 等の trivial 更新は反映しない)。
+      const eObj = (existingPayload && typeof existingPayload === "object" && !Array.isArray(existingPayload))
+        ? existingPayload as Record<string, unknown> : {};
+      const len = (v: unknown) => Array.isArray(v) ? v.length : 0;
+      const sameCounts =
+        merged.sessions.length === len(eObj.sessions) &&
+        merged.distances.length === len(eObj.distances) &&
+        merged.speeds.length === len(eObj.speeds);
+      if (sameCounts) {
+        skipped.push({ index: plan[i].index, reason: "no_change", key: plan[i].key });
+        continue;
+      }
+      filtered.push({ ...plan[i], body: JSON.stringify(merged) });
     }
     plan.length = 0;
     plan.push(...filtered);
   }
 
   // Phase 3: write the remaining plan. We treat "0 to write" as success when
-  // there were valid days (= all already existed) and 400 only when nothing
-  // could be parsed in the first place.
+  // there were valid days (= 全 day が no_change で merge 不要) and 400 only when
+  // nothing could be parsed in the first place.
   const anyValidInput = plan.length + skipped.filter(
-    (s) => s.reason === "already_exists",
+    (s) => s.reason === "no_change" || s.reason === "already_exists",
   ).length > 0;
   if (!anyValidInput) {
     return c.json({ error: "no_valid_days", skipped }, 400);

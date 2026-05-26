@@ -286,13 +286,30 @@ describe("POST /api/upload-batch", () => {
     expect(await day2!.text()).toBe('{"sessions":[{"x":1}]}');
   });
 
-  it("incremental: skips days whose R2 key already exists (Refs #7)", async () => {
-    // Pre-populate one of the two days
-    await env.R2.put("hc/2026/06-10.json", '{"old":true}');
+  it("incremental: merges new sessions into existing R2 payload (Refs #18)", async () => {
+    // 既存ファイル: sessions=[A], distances=[X]
+    await env.R2.put("hc/2026/06-10.json", JSON.stringify({
+      date: "2026-06-10",
+      sessions: [{ startTime: "2026-06-10T01:00:00Z", endTime: "2026-06-10T01:30:00Z", exerciseType: 56 }],
+      distances: [{ startTime: "2026-06-10T01:00:00Z", endTime: "2026-06-10T01:30:00Z", km: 5 }],
+    }));
+    // 新 batch: 同 day に session B 追加 (Health Connect が後から sync した想定)
     const body = JSON.stringify({
       days: [
-        { date: "2026-06-10", payload: { fresh: 1 } }, // should be skipped (already exists)
-        { date: "2026-06-11", payload: { fresh: 2 } }, // should be written
+        {
+          date: "2026-06-10",
+          payload: {
+            date: "2026-06-10",
+            sessions: [
+              // 既存 A
+              { startTime: "2026-06-10T01:00:00Z", endTime: "2026-06-10T01:30:00Z", exerciseType: 56 },
+              // 新 B
+              { startTime: "2026-06-10T19:00:00Z", endTime: "2026-06-10T19:30:00Z", exerciseType: 56 },
+            ],
+            distances: [{ startTime: "2026-06-10T01:00:00Z", endTime: "2026-06-10T01:30:00Z", km: 5 }],
+          },
+        },
+        { date: "2026-06-11", payload: { date: "2026-06-11", sessions: [], distances: [] } }, // new file
       ],
     });
     const r = await app.request(
@@ -302,24 +319,39 @@ describe("POST /api/upload-batch", () => {
     );
     expect(r.status).toBe(200);
     const j = (await r.json()) as {
-      ok: boolean;
-      written: number;
-      keys: string[];
-      skipped: Array<{ index: number; reason: string; key?: string }>;
-      force: boolean;
+      ok: boolean; written: number; keys: string[]; force: boolean;
+      skipped: Array<{ index: number; reason: string }>;
     };
-    expect(j.written).toBe(1);
-    expect(j.keys).toEqual(["hc/2026/06-11.json"]);
+    expect(j.written).toBe(2); // both 06-10 (merged) and 06-11 (new) written
     expect(j.force).toBe(false);
-    expect(j.skipped).toContainEqual({
-      index: 0,
-      reason: "already_exists",
-      key: "hc/2026/06-10.json",
-    });
-    // existing key was untouched
-    expect(await (await env.R2.get("hc/2026/06-10.json"))!.text()).toBe('{"old":true}');
-    // new key was written
-    expect(await (await env.R2.get("hc/2026/06-11.json"))!.text()).toBe('{"fresh":2}');
+    const stored = JSON.parse(await (await env.R2.get("hc/2026/06-10.json"))!.text());
+    expect(stored.sessions.length).toBe(2); // A + B merged
+    const ids = stored.sessions.map((s: any) => s.startTime);
+    expect(ids).toContain("2026-06-10T01:00:00Z");
+    expect(ids).toContain("2026-06-10T19:00:00Z");
+  });
+
+  it("incremental: skips day with no_change when sessions already present", async () => {
+    const payload = {
+      date: "2026-06-15",
+      sessions: [{ startTime: "2026-06-15T02:00:00Z", endTime: "2026-06-15T02:20:00Z", exerciseType: 56 }],
+      distances: [],
+    };
+    await env.R2.put("hc/2026/06-15.json", JSON.stringify(payload));
+    // 同じ payload を再 upload (= 新しい session 無し)
+    const r = await app.request(
+      "/api/upload-batch",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify({ days: [{ date: "2026-06-15", payload }] }),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { written: number; skipped: Array<{ reason: string }> };
+    expect(j.written).toBe(0);
+    expect(j.skipped.some((s) => s.reason === "no_change")).toBe(true);
   });
 
   it("force=true overrides incremental and overwrites existing keys", async () => {
@@ -340,12 +372,18 @@ describe("POST /api/upload-batch", () => {
   });
 
   it("200 (written=0) when all valid days already exist", async () => {
-    await env.R2.put("hc/2026/08-01.json", "{}");
-    await env.R2.put("hc/2026/08-02.json", "{}");
+    // merge mode: 既存と同じ payload を投げると no_change で skip される
+    const same = (date: string) => ({
+      date,
+      sessions: [],
+      distances: [],
+    });
+    await env.R2.put("hc/2026/08-01.json", JSON.stringify(same("2026-08-01")));
+    await env.R2.put("hc/2026/08-02.json", JSON.stringify(same("2026-08-02")));
     const body = JSON.stringify({
       days: [
-        { date: "2026-08-01", payload: { a: 1 } },
-        { date: "2026-08-02", payload: { a: 2 } },
+        { date: "2026-08-01", payload: same("2026-08-01") },
+        { date: "2026-08-02", payload: same("2026-08-02") },
       ],
     });
     const r = await app.request(
@@ -357,7 +395,10 @@ describe("POST /api/upload-batch", () => {
     const j = (await r.json()) as { ok: boolean; written: number; skipped: Array<{ reason: string }> };
     expect(j.ok).toBe(true);
     expect(j.written).toBe(0);
-    expect(j.skipped.filter((s) => s.reason === "already_exists")).toHaveLength(2);
+    // 旧: already_exists; 新 (merge mode): 同 payload なら no_change
+    expect(
+      j.skipped.filter((s) => s.reason === "already_exists" || s.reason === "no_change"),
+    ).toHaveLength(2);
   });
 });
 
@@ -904,7 +945,8 @@ describe("/api/upload → D1 workouts upsert", () => {
     expect(j.indexed).toBe(2);
   });
 
-  it("upload-batch: skipped (already-exists) days are not re-indexed", async () => {
+  it("upload-batch: merge mode re-indexes when new sessions arrive (Refs #18)", async () => {
+    // pre-populate 11-01 with empty sessions. 新 batch で session 追加 → merge で write + index
     await env.R2.put("hc/2026/11-01.json", '{"sessions":[]}');
     const body = JSON.stringify({
       days: [
@@ -940,8 +982,8 @@ describe("/api/upload → D1 workouts upsert", () => {
       env,
     );
     const j = (await r.json()) as { written: number; indexed: number };
-    expect(j.written).toBe(1); // 11-02 のみ
-    expect(j.indexed).toBe(1);
+    expect(j.written).toBe(2); // 11-01 merge + 11-02 new
+    expect(j.indexed).toBe(2); // 各 1 session ずつ
   });
 });
 
