@@ -349,19 +349,20 @@ function badge(type) {
 function renderItem(it) {
   if (it.type === "matched") {
     const hc = it.hc, z = it.zones;
+    const href = '/workout?hc=' + encodeURIComponent(hc.id) + '&zones=' + encodeURIComponent(z.id);
     return [
-      '<div class="border-l-2 border-emerald-400 pl-2 py-1">',
+      '<a href="', href, '" class="block border-l-2 border-emerald-400 pl-2 py-1 hover:bg-slate-50 rounded-r">',
       '<div class="flex items-center justify-between">',
       '<span class="text-xs font-medium">', badge("matched"),
       ' ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at),
       ' ', escapeHtml(hc.activity_name || "—"), '</span>',
-      '<span class="text-[10px] text-slate-500">overlap ', fmtDur(it.overlap_sec), '</span>',
+      '<span class="text-[10px] text-slate-500">overlap ', fmtDur(it.overlap_sec), ' ›</span>',
       '</div>',
       '<div class="text-[11px] text-slate-600 grid grid-cols-2 gap-x-2">',
       '<span>HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), '</span>',
       '<span>Zones: ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"), '</span>',
       '</div>',
-      '</div>',
+      '</a>',
     ].join("");
   }
   if (it.type === "hc_only") {
@@ -437,6 +438,224 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshZonesList().catch(() => {});
   refreshWorkouts().catch(() => {});
 });
+</script>
+</body>
+</html>`;
+
+
+/**
+ * 突合 detail ページ。`/workout?hc=<id>&zones=<id>` で開く。
+ * `/api/workout` から D1 行 + R2 raw を取得し、Chart.js で速度推移と HR zones を描画。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+export const WORKOUT_DETAIL_HTML = `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Workout 詳細 — HC Reader</title>
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<meta name="theme-color" content="#059669" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+<div class="max-w-3xl mx-auto p-4 space-y-4">
+  <header class="flex items-center justify-between pt-2">
+    <a href="/" class="text-sm text-emerald-700">‹ 戻る</a>
+    <h1 class="text-lg font-semibold">Workout 詳細</h1>
+    <span></span>
+  </header>
+
+  <section id="summary" class="bg-white rounded-2xl shadow p-4 text-sm text-slate-700">読込中…</section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold">速度推移 (HC speeds)</h2>
+    <p id="speed-empty" class="text-xs text-slate-500 hidden">速度サンプル無し</p>
+    <canvas id="speed-chart" height="160"></canvas>
+  </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold">心拍ゾーン (Zones zones)</h2>
+    <p id="zones-empty" class="text-xs text-slate-500 hidden">zones 情報無し</p>
+    <canvas id="zones-chart" height="160"></canvas>
+  </section>
+
+  <details class="bg-white rounded-2xl shadow p-4">
+    <summary class="cursor-pointer text-sm font-semibold">raw payload (debug)</summary>
+    <pre id="raw-dump" class="mt-2 text-[10px] text-slate-600 overflow-x-auto whitespace-pre-wrap"></pre>
+  </details>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const hcId = params.get("hc");
+const zId = params.get("zones");
+
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function fmtDur(sec) {
+  if (sec === null || sec === undefined) return "—";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return (h > 0 ? h + "h " : "") + m + "m";
+}
+function fmtKm(m) {
+  if (m === null || m === undefined) return "—";
+  return (m / 1000).toFixed(2) + " km";
+}
+function escapeHtml(s) {
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return String(s).replace(/[&<>"']/g, (c) => map[c]);
+}
+
+async function load() {
+  if (!hcId && !zId) {
+    document.getElementById("summary").textContent = "?hc= / ?zones= 必須";
+    return;
+  }
+  const qs = new URLSearchParams();
+  if (hcId) qs.set("hc", hcId);
+  if (zId) qs.set("zones", zId);
+  const r = await fetch("/api/workout?" + qs.toString(), { credentials: "include" });
+  if (!r.ok) {
+    document.getElementById("summary").textContent = "fetch failed (" + r.status + ")";
+    return;
+  }
+  const j = await r.json();
+  renderSummary(j);
+  renderSpeedChart(j.hc && j.hc.raw);
+  renderZonesChart(j.zones && j.zones.raw);
+  document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
+}
+
+function renderSummary(j) {
+  const hc = j.hc && j.hc.row;
+  const z = j.zones && j.zones.row;
+  const html = [];
+  if (hc) {
+    html.push('<div class="mb-2">');
+    html.push('<div class="text-xs text-slate-500">HC (Android Health Connect)</div>');
+    html.push('<div class="font-medium">', escapeHtml(hc.activity_name || "—"), ' ',
+              fmtTime(hc.start_at), '–', fmtTime(hc.end_at), '</div>');
+    html.push('<div class="text-xs">距離 ', fmtKm(hc.distance_m), ' / 時間 ', fmtDur(hc.duration_sec), '</div>');
+    html.push('</div>');
+  }
+  if (z) {
+    html.push('<div>');
+    html.push('<div class="text-xs text-slate-500">Zones (iOS Apple Watch)</div>');
+    html.push('<div class="font-medium">', escapeHtml(z.activity_name || "—"), ' ',
+              fmtTime(z.start_at), '–', fmtTime(z.end_at), '</div>');
+    html.push('<div class="text-xs">距離 ', fmtKm(z.distance_m), ' / 平均心拍 ♥', (z.avg_heart_rate ?? "—"),
+              ' / kcal ', (z.active_calories ?? "—"), '</div>');
+    html.push('</div>');
+  }
+  document.getElementById("summary").innerHTML = html.join("") || "(データ無し)";
+}
+
+function renderSpeedChart(hcRaw) {
+  const canvas = document.getElementById("speed-chart");
+  const empty = document.getElementById("speed-empty");
+  const speeds = hcRaw && Array.isArray(hcRaw.speeds) ? hcRaw.speeds : [];
+  // すべての samples を平らに集める
+  const points = [];
+  for (const s of speeds) {
+    if (!s || !Array.isArray(s.samples)) continue;
+    for (const sa of s.samples) {
+      if (sa && typeof sa.time === "string" && typeof sa.kmh === "number") {
+        points.push({ x: new Date(sa.time).getTime(), y: sa.kmh });
+      }
+    }
+  }
+  points.sort((a, b) => a.x - b.x);
+  if (points.length === 0) {
+    empty.classList.remove("hidden");
+    canvas.classList.add("hidden");
+    return;
+  }
+  const labels = points.map((p) => {
+    const d = new Date(p.x);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
+  });
+  new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "速度 (km/h)",
+        data: points.map((p) => p.y),
+        borderColor: "#059669",
+        backgroundColor: "rgba(5,150,105,0.1)",
+        tension: 0.2,
+        pointRadius: 0,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, title: { display: true, text: "km/h" } },
+        x: { ticks: { maxTicksLimit: 8, autoSkip: true } },
+      },
+    },
+  });
+}
+
+function renderZonesChart(zRaw) {
+  const canvas = document.getElementById("zones-chart");
+  const empty = document.getElementById("zones-empty");
+  const zones = zRaw && zRaw.zones && typeof zRaw.zones === "object" ? zRaw.zones : null;
+  if (!zones) { empty.classList.remove("hidden"); canvas.classList.add("hidden"); return; }
+  // 各 zone から duration (sec) を抽出。形は { duration: { value, unit } } を想定し
+  // それ以外なら value プロパティをトライ
+  function pickSec(z) {
+    if (!z || typeof z !== "object") return 0;
+    if (z.duration && typeof z.duration === "object") {
+      const v = z.duration.value, u = z.duration.unit;
+      if (typeof v !== "number") return 0;
+      if (u === "sec" || u === "s") return v;
+      if (u === "min") return v * 60;
+      if (u === "hr" || u === "hour") return v * 3600;
+      return v;
+    }
+    if (typeof z.value === "number") return z.value;
+    return 0;
+  }
+  const labels = [];
+  const data = [];
+  const COLORS = ["#94a3b8", "#22d3ee", "#10b981", "#f59e0b", "#ef4444"];
+  for (let i = 1; i <= 5; i++) {
+    const key = "zone" + i;
+    if (zones[key] !== undefined) {
+      labels.push("Z" + i);
+      data.push(Math.round(pickSec(zones[key]) / 60 * 10) / 10); // min
+    }
+  }
+  if (data.length === 0) { empty.classList.remove("hidden"); canvas.classList.add("hidden"); return; }
+  new Chart(canvas.getContext("2d"), {
+    type: "bar",
+    data: { labels, datasets: [{
+      label: "時間 (min)",
+      data,
+      backgroundColor: COLORS.slice(0, data.length),
+    }]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: "min" } } },
+    },
+  });
+}
+
+load();
 </script>
 </body>
 </html>`;

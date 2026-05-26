@@ -34,7 +34,13 @@ import {
   uploadKeyForDateString,
   zonesKeyFor,
 } from "./r2";
-import { FAVICON_ICO_BYTES, INDEX_HTML, MANIFEST_JSON, SERVICE_WORKER_JS } from "./ui";
+import {
+  FAVICON_ICO_BYTES,
+  INDEX_HTML,
+  MANIFEST_JSON,
+  SERVICE_WORKER_JS,
+  WORKOUT_DETAIL_HTML,
+} from "./ui";
 
 /**
  * auth-worker (`auth.ippoan.org`) のログイン画面に飛ばす URL を組む。
@@ -85,6 +91,27 @@ function constantTimeEqualStr(a: string, b: string): boolean {
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
+
+/**
+ * `GET /workout` — 突合 detail ページ。Chart.js で速度推移 + HR zones を描画。
+ * `?hc=<id>&zones=<id>` のいずれかは必須 (片方でも可)。auth は `/` と同じ。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.get("/workout", async (c) => {
+  const expected = await readUploadToken(c.env);
+  if (expected) {
+    const header = c.req.header("authorization") ?? "";
+    const m = /^Bearer\s+(.+)$/i.exec(header);
+    if (m && constantTimeEqualStr(m[1], expected)) {
+      return c.html(WORKOUT_DETAIL_HTML);
+    }
+  }
+  if (await verifyAuthCookie(c.env, c.req.header("cookie") ?? "")) {
+    return c.html(WORKOUT_DETAIL_HTML);
+  }
+  return c.redirect(buildAuthLoginUrl(c.req.url), 302);
+});
 
 app.get("/manifest.json", () =>
   new Response(MANIFEST_JSON, {
@@ -448,6 +475,44 @@ app.get("/api/zones", apiAuth, async (c) => {
  *
  * Refs ippoan/HealthConnectReaderWorker#18
  */
+/**
+ * `GET /api/workout?hc=<id>&zones=<id>` — 突合 detail 用。D1 行 + R2 raw payload
+ * を結合して返す。HC / Zones いずれかは省略可能 (片方だけでも返す)。
+ *
+ * raw payload を含めるのは UI 側で速度推移 (HC `speeds[].samples[]`) や HR zones
+ * (Zones `zones.zone1..5`) を描画するため。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#18
+ */
+app.get("/api/workout", apiAuth, async (c) => {
+  const hcId = c.req.query("hc");
+  const zonesId = c.req.query("zones");
+  if (!hcId && !zonesId) {
+    return c.json({ error: "missing_hc_or_zones" }, 400);
+  }
+  const fetchOne = async (source: "hc" | "zones", id: string) => {
+    const row = await c.env.DB.prepare(
+      "SELECT * FROM workouts WHERE source = ? AND id = ?",
+    ).bind(source, id).first<Record<string, unknown>>();
+    if (!row) return null;
+    const rawKey = row.raw_key as string | undefined;
+    let raw: unknown = null;
+    if (rawKey) {
+      const obj = await c.env.R2.get(rawKey);
+      if (obj) {
+        try { raw = await obj.json(); } catch { raw = null; }
+      }
+    }
+    return { row, raw };
+  };
+  const hc = hcId ? await fetchOne("hc", hcId) : null;
+  const zones = zonesId ? await fetchOne("zones", zonesId) : null;
+  if (!hc && !zones) {
+    return c.json({ error: "not_found" }, 404);
+  }
+  return c.json({ hc, zones });
+});
+
 app.get("/api/workouts", apiAuth, async (c) => {
   const raw = c.req.query("days");
   let days = 30;
