@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import app from "../src/index";
-import { zonesPayloadToRow } from "../src/db";
+import { hcPayloadToRows, listWorkouts, zonesPayloadToRow } from "../src/db";
 import { applySchema } from "../src/migrations";
 import { summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
 
@@ -689,6 +689,252 @@ describe("zonesPayloadToRow", () => {
     expect(row.duration_sec).toBeNull();
     expect(row.steps).toBeNull();
     expect(row.activity_name).toBeNull();
+  });
+});
+
+describe("hcPayloadToRows (HC → workouts 正規化)", () => {
+  it("returns empty array when sessions[] is missing", async () => {
+    const rows = await hcPayloadToRows(
+      { date: "2026-05-01" },
+      "hc/2026/05-01.json",
+      "2026-05-01",
+      "2026-05-01T00:00:00.000Z",
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("converts 1 session into 1 row, sums overlapping distances", async () => {
+    const payload = {
+      date: "2026-05-01",
+      sessions: [
+        {
+          startTime: "2026-05-01T08:00:00Z",
+          endTime: "2026-05-01T08:30:00Z",
+          exerciseType: 56, // Running
+          title: null,
+          source: "com.google.android.apps.fitness",
+        },
+      ],
+      distances: [
+        // overlap (内側)
+        { startTime: "2026-05-01T08:05:00Z", endTime: "2026-05-01T08:10:00Z", km: 1.0, source: "x" },
+        // overlap (端跨ぎ後ろ)
+        { startTime: "2026-05-01T08:25:00Z", endTime: "2026-05-01T08:35:00Z", km: 1.5, source: "x" },
+        // 完全に外
+        { startTime: "2026-05-01T09:00:00Z", endTime: "2026-05-01T09:30:00Z", km: 99, source: "x" },
+      ],
+    };
+    const rows = await hcPayloadToRows(
+      payload,
+      "hc/2026/05-01.json",
+      "2026-05-01",
+      "2026-05-01T09:00:00.000Z",
+    );
+    expect(rows.length).toBe(1);
+    const r = rows[0];
+    expect(r.source).toBe("hc");
+    expect(r.id).toMatch(/^hc_[0-9a-f]{16}$/);
+    expect(r.start_at).toBe("2026-05-01T08:00:00Z");
+    expect(r.end_at).toBe("2026-05-01T08:30:00Z");
+    expect(r.date).toBe("2026-05-01");
+    expect(r.duration_sec).toBe(30 * 60);
+    expect(r.distance_m).toBe(2500); // 1.0 + 1.5 km → 2500 m, 99 km は除外
+    expect(r.activity_name).toBe("ランニング");
+    expect(r.raw_key).toBe("hc/2026/05-01.json");
+  });
+
+  it("uses title when present, falls back to exerciseType name", async () => {
+    const payload = {
+      sessions: [
+        {
+          startTime: "2026-05-02T10:00:00Z",
+          endTime: "2026-05-02T10:20:00Z",
+          exerciseType: 56,
+          title: "朝ラン",
+        },
+        {
+          startTime: "2026-05-02T11:00:00Z",
+          endTime: "2026-05-02T11:30:00Z",
+          exerciseType: 9999, // 未知
+          title: null,
+        },
+      ],
+    };
+    const rows = await hcPayloadToRows(
+      payload,
+      "hc/2026/05-02.json",
+      "2026-05-02",
+      "2026-05-02T12:00:00.000Z",
+    );
+    expect(rows[0].activity_name).toBe("朝ラン");
+    expect(rows[1].activity_name).toBe("exercise_9999");
+  });
+
+  it("skips sessions with non-string startTime / endTime", async () => {
+    const payload = {
+      sessions: [
+        { startTime: 123, endTime: "x" },
+        { startTime: "2026-05-03T00:00:00Z" }, // endTime missing
+        { startTime: "2026-05-03T01:00:00Z", endTime: "2026-05-03T02:00:00Z", exerciseType: 56 },
+      ],
+    };
+    const rows = await hcPayloadToRows(
+      payload,
+      "hc/2026/05-03.json",
+      "2026-05-03",
+      "2026-05-03T03:00:00.000Z",
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].start_at).toBe("2026-05-03T01:00:00Z");
+  });
+
+  it("returns same id for same session re-uploaded", async () => {
+    const session = {
+      startTime: "2026-05-04T10:00:00Z",
+      endTime: "2026-05-04T10:30:00Z",
+      exerciseType: 56,
+    };
+    const a = await hcPayloadToRows(
+      { sessions: [session] },
+      "hc/2026/05-04.json",
+      "2026-05-04",
+      "t1",
+    );
+    const b = await hcPayloadToRows(
+      { sessions: [session] },
+      "hc/2026/05-04.json",
+      "2026-05-04",
+      "t2",
+    );
+    expect(a[0].id).toBe(b[0].id);
+  });
+});
+
+describe("/api/upload → D1 workouts upsert", () => {
+  it("indexes HC sessions into workouts and surfaces `indexed` count", async () => {
+    const payload = {
+      date: "2026-09-01",
+      sessions: [
+        {
+          startTime: "2026-09-01T07:00:00Z",
+          endTime: "2026-09-01T07:30:00Z",
+          exerciseType: 56,
+          title: null,
+        },
+        {
+          startTime: "2026-09-01T17:00:00Z",
+          endTime: "2026-09-01T17:45:00Z",
+          exerciseType: 79, // Walking
+          title: null,
+        },
+      ],
+      distances: [
+        { startTime: "2026-09-01T07:00:00Z", endTime: "2026-09-01T07:30:00Z", km: 5 },
+      ],
+    };
+    const r = await app.request(
+      "/api/upload",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; indexed: number; key: string };
+    expect(j.ok).toBe(true);
+    expect(j.indexed).toBe(2);
+
+    const stored = await listWorkouts(env.DB, { source: "hc", limit: 50 });
+    const ours = stored.filter((w) => w.raw_key === j.key);
+    expect(ours.length).toBe(2);
+    const running = ours.find((w) => w.activity_name === "ランニング");
+    expect(running?.distance_m).toBe(5000);
+  });
+
+  it("upload-batch indexes per-day payloads (force=true to overwrite)", async () => {
+    const body = JSON.stringify({
+      days: [
+        {
+          date: "2026-10-01",
+          payload: {
+            sessions: [
+              {
+                startTime: "2026-10-01T06:00:00Z",
+                endTime: "2026-10-01T06:30:00Z",
+                exerciseType: 56,
+                title: null,
+              },
+            ],
+            distances: [],
+          },
+        },
+        {
+          date: "2026-10-02",
+          payload: {
+            sessions: [
+              {
+                startTime: "2026-10-02T06:00:00Z",
+                endTime: "2026-10-02T06:30:00Z",
+                exerciseType: 79,
+                title: null,
+              },
+            ],
+            distances: [],
+          },
+        },
+      ],
+    });
+    const r = await app.request(
+      "/api/upload-batch?force=true",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { written: number; indexed: number };
+    expect(j.written).toBe(2);
+    expect(j.indexed).toBe(2);
+  });
+
+  it("upload-batch: skipped (already-exists) days are not re-indexed", async () => {
+    await env.R2.put("hc/2026/11-01.json", '{"sessions":[]}');
+    const body = JSON.stringify({
+      days: [
+        {
+          date: "2026-11-01",
+          payload: {
+            sessions: [
+              {
+                startTime: "2026-11-01T06:00:00Z",
+                endTime: "2026-11-01T06:30:00Z",
+                exerciseType: 56,
+              },
+            ],
+          },
+        },
+        {
+          date: "2026-11-02",
+          payload: {
+            sessions: [
+              {
+                startTime: "2026-11-02T06:00:00Z",
+                endTime: "2026-11-02T06:30:00Z",
+                exerciseType: 56,
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const r = await app.request(
+      "/api/upload-batch",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    const j = (await r.json()) as { written: number; indexed: number };
+    expect(j.written).toBe(1); // 11-02 のみ
+    expect(j.indexed).toBe(1);
   });
 });
 
