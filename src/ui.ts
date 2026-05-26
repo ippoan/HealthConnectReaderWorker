@@ -156,6 +156,20 @@ export const INDEX_HTML = `<!doctype html>
     <h2 class="font-semibold mb-2">履歴</h2>
     <p id="history" class="text-sm text-slate-600">—</p>
   </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-3">
+    <div class="flex items-center justify-between">
+      <h2 class="font-semibold">日付別 + 突合状況</h2>
+      <select id="workouts-days" class="text-xs border border-slate-300 rounded px-2 py-1">
+        <option value="7">7 日</option>
+        <option value="30" selected>30 日</option>
+        <option value="90">90 日</option>
+        <option value="365">1 年</option>
+      </select>
+    </div>
+    <p id="workouts-summary" class="text-xs text-slate-500">読込中…</p>
+    <div id="workouts-days-list" class="space-y-2"></div>
+  </section>
 </div>
 
 <script>
@@ -305,6 +319,101 @@ async function uploadZones() {
   refreshZonesList();
 }
 
+// 日付別 + 突合 view
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function fmtDur(sec) {
+  if (sec === null || sec === undefined) return "—";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return (h > 0 ? h + "h " : "") + m + "m";
+}
+function fmtKm(m) {
+  if (m === null || m === undefined) return "—";
+  return (m / 1000).toFixed(2) + " km";
+}
+function badge(type) {
+  if (type === "matched") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800">突合</span>';
+  if (type === "hc_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800">HC のみ</span>';
+  return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-100 text-amber-800">Zones のみ</span>';
+}
+function renderItem(it) {
+  if (it.type === "matched") {
+    const hc = it.hc, z = it.zones;
+    return [
+      '<div class="border-l-2 border-emerald-400 pl-2 py-1">',
+      '<div class="flex items-center justify-between">',
+      '<span class="text-xs font-medium">', badge("matched"),
+      ' ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at),
+      ' ', escapeHtml(hc.activity_name || "—"), '</span>',
+      '<span class="text-[10px] text-slate-500">overlap ', fmtDur(it.overlap_sec), '</span>',
+      '</div>',
+      '<div class="text-[11px] text-slate-600 grid grid-cols-2 gap-x-2">',
+      '<span>HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), '</span>',
+      '<span>Zones: ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"), '</span>',
+      '</div>',
+      '</div>',
+    ].join("");
+  }
+  if (it.type === "hc_only") {
+    const hc = it.hc;
+    return [
+      '<div class="border-l-2 border-sky-300 pl-2 py-1">',
+      '<div class="text-xs font-medium">', badge("hc_only"),
+      ' ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at),
+      ' ', escapeHtml(hc.activity_name || "—"), '</div>',
+      '<div class="text-[11px] text-slate-600">HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), '</div>',
+      '</div>',
+    ].join("");
+  }
+  const z = it.zones;
+  return [
+    '<div class="border-l-2 border-amber-300 pl-2 py-1">',
+    '<div class="text-xs font-medium">', badge("zones_only"),
+    ' ', fmtTime(z.start_at), '–', fmtTime(z.end_at),
+    ' ', escapeHtml(z.activity_name || "—"), '</div>',
+    '<div class="text-[11px] text-slate-600">Zones: ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"), '</div>',
+    '</div>',
+  ].join("");
+}
+function escapeHtml(s) {
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return String(s).replace(/[&<>"']/g, (c) => map[c]);
+}
+async function refreshWorkouts() {
+  const days = $("workouts-days").value;
+  const summary = $("workouts-summary");
+  const list = $("workouts-days-list");
+  summary.textContent = "読込中…";
+  list.innerHTML = "";
+  const r = await fetch("/api/workouts?days=" + encodeURIComponent(days), authFetchInit());
+  if (!r.ok) {
+    summary.textContent = "fetch failed (" + r.status + ")";
+    return;
+  }
+  const j = await r.json();
+  const matched = j.days.reduce((acc, d) => acc + d.matched_count, 0);
+  summary.textContent = j.day_count + " 日 / 合計 " + j.total + " workout / 突合 " + matched + " 件";
+  if (j.day_count === 0) {
+    list.innerHTML = '<p class="text-xs text-slate-400">該当データなし</p>';
+    return;
+  }
+  const html = [];
+  for (const day of j.days) {
+    html.push('<details class="border border-slate-200 rounded-lg" open>');
+    html.push('<summary class="cursor-pointer select-none px-3 py-2 text-sm flex items-center justify-between">');
+    html.push('<span class="font-medium">', day.date, '</span>');
+    html.push('<span class="text-[11px] text-slate-500">HC ', day.hc_count, ' / Zones ', day.zones_count, ' / 突合 ', day.matched_count, '</span>');
+    html.push('</summary>');
+    html.push('<div class="px-3 pb-2 space-y-1">');
+    for (const it of day.items) html.push(renderItem(it));
+    html.push('</div></details>');
+  }
+  list.innerHTML = html.join("");
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   $("env-badge").textContent = hasNative ? "native bridge: ✓" : "PWA / preview";
   $("upload-btn").addEventListener("click", uploadNow);
@@ -316,8 +425,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   if (hasNative) $("auto-toggle").checked = window.HC.isDailyUploadScheduled();
   $("zones-upload-btn").addEventListener("click", uploadZones);
+  $("workouts-days").addEventListener("change", () => { refreshWorkouts().catch(() => {}); });
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});
+  refreshWorkouts().catch(() => {});
 });
 </script>
 </body>
