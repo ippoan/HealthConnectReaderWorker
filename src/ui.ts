@@ -1151,6 +1151,7 @@ function installToggleChips(containerId, chartKey, chart, datasets) {
 
 // ----- セッション picker: /api/workouts から候補を取得し、 -----
 // **グループ単位** で checkbox 表示し、「適用」で /workout?hc=...&zones=... を更新 + reload。
+// matched group は内部の hcs[] / zoneses[] を全部 positional pair で展開する。
 // matched group は内部の hcs[] / zoneses[] を全部展開する (3 HC × 1 Zones なら 3 セッション)。
 let pickerInitialized = false;
 
