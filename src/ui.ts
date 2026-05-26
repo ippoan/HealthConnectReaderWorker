@@ -849,23 +849,22 @@ function renderSpeedChart(j) {
     });
   }
 
-  // 3. 推定モデル: 「最初 T_ramp 秒で 0→V まで線形加速 → V で cruise」を仮定し
-  //    平均速度から逆算で V_target を出す。
-  //      avg = V × (T_total − T_ramp/2) / T_total
-  //      → V = avg × T_total / (T_total − T_ramp/2)
+  // 3. 推定モデル: 「最初 T_ramp 秒で 0→avg まで線形加速 → avg で cruise」を仮定し
+  //    平均ライン (緑/青破線) と完全に一致する高さで cruise させる。
+  //    厳密には ramp 中の低速分があるので実距離より僅か少ない推定総距離になるが、
+  //    視覚的に「平均より高い」違和感を避けて分かりやすさ優先 (ざっくり指標)。
   //    短い workout (< 2分) は ramp 区間が支配的になり推定が暴れるので skip。
   if (hcAvg !== null && xMin !== undefined && xMax !== undefined) {
     const totalSec = (xMax - xMin) / 1000;
     const tRamp = Math.min(60, totalSec * 0.1);  // 60s or 全体 10% の小さい方
     if (totalSec > 120) {
-      const vTarget = hcAvg * totalSec / (totalSec - tRamp / 2);
       const rampEndX = xMin + tRamp * 1000;
       datasets.push({
-        label: "推定モデル " + vTarget.toFixed(2) + " km/h (ramp " + Math.round(tRamp) + "s)",
+        label: "推定モデル (ramp " + Math.round(tRamp) + "s → 平均で cruise)",
         data: [
           { x: xMin, y: 0 },
-          { x: rampEndX, y: vTarget },
-          { x: xMax, y: vTarget },
+          { x: rampEndX, y: hcAvg },
+          { x: xMax, y: hcAvg },
         ],
         borderColor: "#94a3b8",
         borderDash: [2, 3],
