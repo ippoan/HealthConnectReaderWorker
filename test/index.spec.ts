@@ -2,7 +2,14 @@ import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import app from "../src/index";
-import { hcPayloadToRows, listWorkouts, zonesPayloadToRow } from "../src/db";
+import {
+  groupAndMatch,
+  hcPayloadToRows,
+  listWorkouts,
+  pairHcZones,
+  zonesPayloadToRow,
+} from "../src/db";
+import type { WorkoutRow } from "../src/db";
 import { applySchema } from "../src/migrations";
 import { summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
 
@@ -935,6 +942,208 @@ describe("/api/upload → D1 workouts upsert", () => {
     const j = (await r.json()) as { written: number; indexed: number };
     expect(j.written).toBe(1); // 11-02 のみ
     expect(j.indexed).toBe(1);
+  });
+});
+
+describe("pairHcZones (時刻 overlap で HC × Zones を pair)", () => {
+  const baseRow = (over: Partial<WorkoutRow>): WorkoutRow => ({
+    id: "x",
+    source: "hc",
+    date: "2026-05-01",
+    start_at: null,
+    end_at: null,
+    activity_name: null,
+    distance_m: null,
+    duration_sec: null,
+    active_calories: null,
+    steps: null,
+    avg_heart_rate: null,
+    raw_key: "k",
+    uploaded_at: "2026-05-01T00:00:00Z",
+    ...over,
+  });
+
+  it("pairs HC and Zones with overlapping time ranges (1 day, 1 workout each)", () => {
+    const hc = baseRow({
+      id: "hc1",
+      source: "hc",
+      start_at: "2026-05-01T08:00:00Z",
+      end_at: "2026-05-01T08:30:00Z",
+    });
+    const z = baseRow({
+      id: "z1",
+      source: "zones",
+      start_at: "2026-05-01T08:05:00Z",
+      end_at: "2026-05-01T08:25:00Z",
+    });
+    const items = pairHcZones([hc, z]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ type: "matched", overlap_sec: 20 * 60 });
+  });
+
+  it("multi-workout per day: each HC gets its best-overlap Zones, sorted by time", () => {
+    // 同日に 3 workout (08:00, 12:00, 18:00 HC), Zones 2 件 (08:00, 18:00)
+    const rows: WorkoutRow[] = [
+      baseRow({ id: "hc1", source: "hc", start_at: "2026-05-02T08:00:00Z", end_at: "2026-05-02T08:30:00Z" }),
+      baseRow({ id: "hc2", source: "hc", start_at: "2026-05-02T12:00:00Z", end_at: "2026-05-02T12:20:00Z" }),
+      baseRow({ id: "hc3", source: "hc", start_at: "2026-05-02T18:00:00Z", end_at: "2026-05-02T18:45:00Z" }),
+      baseRow({ id: "z1", source: "zones", start_at: "2026-05-02T08:01:00Z", end_at: "2026-05-02T08:29:00Z" }),
+      baseRow({ id: "z2", source: "zones", start_at: "2026-05-02T18:02:00Z", end_at: "2026-05-02T18:44:00Z" }),
+    ];
+    const items = pairHcZones(rows);
+    // 並び順は start_at 昇順
+    expect(items.map((it) => startAtOfTest(it))).toEqual([
+      "2026-05-02T08:00:00Z",
+      "2026-05-02T12:00:00Z",
+      "2026-05-02T18:00:00Z",
+    ]);
+    expect(items[0].type).toBe("matched"); // 08:00 HC ↔ Z1
+    expect(items[1].type).toBe("hc_only"); // 12:00 HC は対応 Zones 無し
+    expect(items[2].type).toBe("matched"); // 18:00 HC ↔ Z2
+  });
+
+  it("zones_only is interleaved in time order (not appended)", () => {
+    const rows: WorkoutRow[] = [
+      // HC は 12:00 のみ。Zones は 08:00 と 18:00 (= 両方 zones_only)
+      baseRow({ id: "hc1", source: "hc", start_at: "2026-05-03T12:00:00Z", end_at: "2026-05-03T12:30:00Z" }),
+      baseRow({ id: "z1", source: "zones", start_at: "2026-05-03T08:00:00Z", end_at: "2026-05-03T08:30:00Z" }),
+      baseRow({ id: "z2", source: "zones", start_at: "2026-05-03T18:00:00Z", end_at: "2026-05-03T18:30:00Z" }),
+    ];
+    const items = pairHcZones(rows);
+    expect(items.map((it) => it.type)).toEqual(["zones_only", "hc_only", "zones_only"]);
+  });
+
+  it("HC with no start_at → always hc_only (no Zones consumed)", () => {
+    const rows: WorkoutRow[] = [
+      baseRow({ id: "hc-null", source: "hc", start_at: null, end_at: null }),
+      baseRow({ id: "z1", source: "zones", start_at: "2026-05-04T08:00:00Z", end_at: "2026-05-04T08:30:00Z" }),
+    ];
+    const items = pairHcZones(rows);
+    expect(items).toContainEqual(expect.objectContaining({ type: "hc_only" }));
+    expect(items).toContainEqual(expect.objectContaining({ type: "zones_only" }));
+  });
+
+  it("greedy: when 2 HC sessions overlap same Zone, earliest HC wins", () => {
+    const z = baseRow({ id: "z1", source: "zones", start_at: "2026-05-05T10:00:00Z", end_at: "2026-05-05T11:00:00Z" });
+    const hcEarly = baseRow({ id: "hc-early", source: "hc", start_at: "2026-05-05T10:00:00Z", end_at: "2026-05-05T10:30:00Z" });
+    const hcLate = baseRow({ id: "hc-late", source: "hc", start_at: "2026-05-05T10:31:00Z", end_at: "2026-05-05T11:00:00Z" });
+    const items = pairHcZones([hcEarly, hcLate, z]);
+    const early = items.find((it) => "hc" in it && it.hc?.id === "hc-early");
+    const late = items.find((it) => "hc" in it && it.hc?.id === "hc-late");
+    expect(early?.type).toBe("matched");
+    expect(late?.type).toBe("hc_only");
+  });
+});
+
+function startAtOfTest(it: any): string {
+  if (it.type === "matched") return it.hc.start_at;
+  if (it.type === "hc_only") return it.hc.start_at;
+  return it.zones.start_at;
+}
+
+describe("GET /api/workouts (日付別 + 突合)", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request("/api/workouts", {}, env);
+    expect(r.status).toBe(401);
+  });
+
+  it("400 on days out of range", async () => {
+    const r = await app.request("/api/workouts?days=0", { headers: auth() }, env);
+    expect(r.status).toBe(400);
+    const r2 = await app.request("/api/workouts?days=1000", { headers: auth() }, env);
+    expect(r2.status).toBe(400);
+  });
+
+  it("returns grouped + matched workouts for the last N days", async () => {
+    // 直近日に HC + Zones を 1 セット仕込む
+    const today = new Date();
+    const yyyy = today.getUTCFullYear();
+    const mm = String(today.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(today.getUTCDate()).padStart(2, "0");
+    const dateStr = `${yyyy}-${mm}-${dd}`;
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, distance_m, duration_sec, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ).bind(
+      "match-hc",
+      "hc",
+      dateStr,
+      `${dateStr}T08:00:00Z`,
+      `${dateStr}T08:30:00Z`,
+      "ランニング",
+      5000,
+      1800,
+      `hc/${yyyy}/${mm}-${dd}.json`,
+      new Date().toISOString(),
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, distance_m, duration_sec, avg_heart_rate, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ).bind(
+      "match-z",
+      "zones",
+      dateStr,
+      `${dateStr}T08:05:00Z`,
+      `${dateStr}T08:28:00Z`,
+      "ランニング",
+      4800,
+      1380,
+      160,
+      `zones/${yyyy}/${mm}-${dd}/match-z.json`,
+      new Date().toISOString(),
+    ).run();
+
+    const r = await app.request(
+      "/api/workouts?days=7",
+      { headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as {
+      days_requested: number;
+      day_count: number;
+      total: number;
+      days: Array<{ date: string; hc_count: number; zones_count: number; matched_count: number; items: any[] }>;
+    };
+    expect(j.days_requested).toBe(7);
+    const todayDay = j.days.find((d) => d.date === dateStr);
+    expect(todayDay).toBeTruthy();
+    expect(todayDay!.matched_count).toBeGreaterThanOrEqual(1);
+    const matchedItem = todayDay!.items.find((it: any) => it.type === "matched" && it.hc.id === "match-hc");
+    expect(matchedItem).toBeTruthy();
+    expect(matchedItem.zones.id).toBe("match-z");
+  });
+});
+
+describe("groupAndMatch", () => {
+  it("groups rows by date, descending; computes per-day counts", () => {
+    const rows: WorkoutRow[] = [
+      {
+        id: "a", source: "hc", date: "2026-05-10",
+        start_at: "2026-05-10T08:00:00Z", end_at: "2026-05-10T08:30:00Z",
+        activity_name: null, distance_m: null, duration_sec: null,
+        active_calories: null, steps: null, avg_heart_rate: null,
+        raw_key: "k1", uploaded_at: "x",
+      },
+      {
+        id: "b", source: "zones", date: "2026-05-10",
+        start_at: "2026-05-10T08:05:00Z", end_at: "2026-05-10T08:25:00Z",
+        activity_name: null, distance_m: null, duration_sec: null,
+        active_calories: null, steps: null, avg_heart_rate: null,
+        raw_key: "k2", uploaded_at: "x",
+      },
+      {
+        id: "c", source: "hc", date: "2026-05-11",
+        start_at: "2026-05-11T08:00:00Z", end_at: "2026-05-11T08:30:00Z",
+        activity_name: null, distance_m: null, duration_sec: null,
+        active_calories: null, steps: null, avg_heart_rate: null,
+        raw_key: "k3", uploaded_at: "x",
+      },
+    ];
+    const out = groupAndMatch(rows);
+    expect(out.map((d) => d.date)).toEqual(["2026-05-11", "2026-05-10"]); // desc
+    const may10 = out.find((d) => d.date === "2026-05-10")!;
+    expect(may10.matched_count).toBe(1);
+    expect(may10.hc_count).toBe(1);
+    expect(may10.zones_count).toBe(1);
   });
 });
 
