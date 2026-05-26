@@ -696,11 +696,12 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
-    <h2 class="font-semibold">速度 + 心拍 (合成、日別)</h2>
+    <h2 class="font-semibold">速度 + 心拍 (合成、group 別)</h2>
     <p id="combined-empty" class="text-xs text-slate-500 hidden">データ無し</p>
     <p class="text-[10px] text-slate-400">
       左軸=速度 (km/h, session 別の平均線)、右軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)。
-      選択した session を JST 日付でグループ化し、1 日 = 1 グラフを縦に並べる
+      上の chip の <span class="font-semibold">G1/G2 ボタン</span>を押して
+      session を group に振分け、各 group ごとに 1 グラフを縦に並べる
       (上下で比較しやすいよう Y 軸スケールは全グラフで共通)。
     </p>
     <div id="combined-charts-container" class="space-y-3"></div>
@@ -796,6 +797,8 @@ async function load() {
   }
   const j = await r.json();
   const sessions = Array.isArray(j.sessions) ? j.sessions : [];
+  // badge handler から再描画できるよう保持
+  window.__sessions = sessions;
   renderSummary(sessions);
   renderSessionChips(sessions);
   renderSpeedChart(sessions);
@@ -805,6 +808,40 @@ async function load() {
   initPicker();
 }
 
+// セッションを Gn (n=1..MAX_GROUPS) に手動アサインする state。
+// 合成 chart はこの group 別に 1 グラフずつ並べる (Refs #57)。
+// 端末ごとに保持 (localStorage)、key は sessionKey() で導出。
+const MAX_GROUPS = 4;
+const GROUP_STATE_KEY = "hcreader.workout-groups.v1";
+function sessionKey(sess) {
+  const hc = sess.hc && sess.hc.row && sess.hc.row.id;
+  const z = sess.zones && sess.zones.row && sess.zones.row.id;
+  return (hc || "") + "::" + (z || "");
+}
+function loadGroupState() {
+  try {
+    const raw = localStorage.getItem(GROUP_STATE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+function saveGroupState(state) {
+  try { localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(state)); } catch { /* quota etc */ }
+}
+function getSessionGroup(sess, state) {
+  const k = sessionKey(sess);
+  const g = state[k];
+  return (typeof g === "number" && g >= 1 && g <= MAX_GROUPS) ? g : 1;
+}
+function cycleSessionGroup(sess, state) {
+  const k = sessionKey(sess);
+  const cur = getSessionGroup(sess, state);
+  const next = cur >= MAX_GROUPS ? 1 : cur + 1;
+  state[k] = next;
+  saveGroupState(state);
+  return next;
+}
+const GROUP_BADGE_COLORS = ["#10b981", "#6366f1", "#f97316", "#dc2626"]; // G1..G4
+
 function renderSessionChips(sessions) {
   const el = document.getElementById("session-chips");
   el.innerHTML = "";
@@ -812,13 +849,32 @@ function renderSessionChips(sessions) {
     el.innerHTML = '<span class="text-xs text-slate-500">セッション無し</span>';
     return;
   }
+  const state = loadGroupState();
   sessions.forEach((sess, idx) => {
     const color = SESSION_COLORS[idx % SESSION_COLORS.length];
     const span = document.createElement("span");
     span.className = "inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-full border";
     span.style.borderColor = color;
     span.style.color = color;
-    span.textContent = sessionLabel(sess);
+    // chip label
+    const label = document.createElement("span");
+    label.textContent = sessionLabel(sess);
+    span.appendChild(label);
+    // G1..G4 toggle ボタン (click で cycle、合成 chart を再描画)
+    const grp = getSessionGroup(sess, state);
+    const badge = document.createElement("button");
+    badge.type = "button";
+    badge.className = "ml-1 px-1.5 py-0.5 rounded text-white text-[10px] font-semibold";
+    badge.style.backgroundColor = GROUP_BADGE_COLORS[grp - 1];
+    badge.textContent = "G" + grp;
+    badge.title = "クリックで group 切替 (G1→G2→...→G" + MAX_GROUPS + "→G1)";
+    badge.addEventListener("click", () => {
+      const next = cycleSessionGroup(sess, state);
+      badge.textContent = "G" + next;
+      badge.style.backgroundColor = GROUP_BADGE_COLORS[next - 1];
+      renderCombinedChart(window.__sessions || []);
+    });
+    span.appendChild(badge);
     el.appendChild(span);
   });
 }
@@ -1036,23 +1092,19 @@ function renderCombinedChart(sessions) {
     if (!row || typeof row.distance_m !== "number" || typeof row.duration_sec !== "number" || row.duration_sec <= 0) return null;
     return (row.distance_m / 1000) / (row.duration_sec / 3600);
   }
-  function jstDateOf(ms) {
-    const d = new Date(ms + 9 * 3600 * 1000);
-    return d.getUTCFullYear() + "-"
-      + String(d.getUTCMonth() + 1).padStart(2, "0") + "-"
-      + String(d.getUTCDate()).padStart(2, "0");
-  }
-
-  // 1. JST 日付ごとに sessions をグルーピング (順序維持)
-  const groupByDate = new Map();
+  // 1. 手動 group 番号 (G1..GMAX_GROUPS) で sessions をグルーピング (Refs #57)
+  //    chip の G ボタンで切替えた割当を localStorage から読む。
+  const state = loadGroupState();
+  const groupByG = new Map();
   for (const sess of sessions) {
     const ms = sessionStartMs(sess);
     if (!ms) continue;
-    const date = jstDateOf(ms);
-    if (!groupByDate.has(date)) groupByDate.set(date, []);
-    groupByDate.get(date).push(sess);
+    const g = getSessionGroup(sess, state);
+    if (!groupByG.has(g)) groupByG.set(g, []);
+    groupByG.get(g).push(sess);
   }
-  const dates = [...groupByDate.keys()].sort().reverse(); // 新しい日付を上に
+  // group 番号 asc (G1 が上)
+  const dates = [...groupByG.keys()].sort((a, b) => a - b);
 
   if (dates.length === 0) {
     empty.classList.remove("hidden");
@@ -1081,9 +1133,9 @@ function renderCombinedChart(sessions) {
   hrMin = Math.max(0, Math.floor((hrMin - 5) / 5) * 5);
   hrMax = Math.ceil((hrMax + 5) / 5) * 5;
 
-  // 3. 日付ごとにチャート 1 個ずつ生成
+  // 3. group 番号ごとにチャート 1 個ずつ生成
   for (const date of dates) {
-    const daySessions = groupByDate.get(date);
+    const daySessions = groupByG.get(date);
 
     // session を X 連結
     const sessDurations = daySessions.map((sess) => {
@@ -1159,10 +1211,11 @@ function renderCombinedChart(sessions) {
       }
     });
 
-    // 1 日分の wrapper を生成して container に追加
+    // 1 group 分の wrapper を生成して container に追加
+    const groupColor = GROUP_BADGE_COLORS[(date - 1) % GROUP_BADGE_COLORS.length];
     const wrap = document.createElement("div");
-    wrap.innerHTML = '<div class="text-xs font-medium text-slate-700 mb-1">'
-      + escapeHtml(date)
+    wrap.innerHTML = '<div class="text-xs font-medium mb-1" style="color:'
+      + groupColor + '">G' + date
       + ' (' + daySessions.length + ' session)</div>'
       + '<div class="relative h-56"><canvas></canvas></div>';
     container.appendChild(wrap);
