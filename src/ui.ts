@@ -556,11 +556,19 @@ function openLinkPicker(side, id) {
   const ul = wrap.querySelector("#pick-list");
   for (const c of candidates) {
     const li = document.createElement("li");
-    li.className = "border border-slate-200 rounded p-2 text-xs hover:bg-emerald-50 cursor-pointer flex items-center justify-between";
+    // 未突合 = slate-50 背景 / 未マッチを示す。突合中 = emerald-50 背景 + ✓ icon。
+    const isMatched = c.group === "突合中";
+    li.className = (isMatched
+      ? "border-l-4 border-emerald-400 bg-emerald-50 "
+      : "border-l-4 border-slate-300 bg-white "
+    ) + "border border-slate-200 rounded p-2 text-xs hover:bg-emerald-100 cursor-pointer flex items-center justify-between gap-2";
+    const badge = isMatched
+      ? '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-500 text-white shrink-0">✓ 突合中</span>'
+      : '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-400 text-white shrink-0">未突合</span>';
     li.innerHTML = '<span>' + c.label + ' <span class="font-medium">' + c.day + '</span> '
       + fmtTime(c.row.start_at) + '–' + fmtTime(c.row.end_at) + ' '
       + escapeHtml(c.row.activity_name || "—") + '</span>'
-      + '<span class="text-[10px] text-slate-500">' + c.group + '</span>';
+      + badge;
     li.addEventListener("click", async () => {
       const hcId = side === "hc" ? id : c.row.id;
       const zonesId = side === "hc" ? c.row.id : id;
