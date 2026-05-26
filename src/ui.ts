@@ -696,6 +696,16 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold">心拍 (平均 / max)</h2>
+    <p id="hr-bar-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
+    <p class="text-[10px] text-slate-400">
+      各セッションの Zones 平均 / max 心拍を棒で比較表示 (HC は心拍未読取のため
+      平均のみ available な場合は緑棒で表示)。
+    </p>
+    <div class="relative h-64"><canvas id="hr-bar-chart"></canvas></div>
+  </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
     <h2 class="font-semibold">心拍時系列</h2>
     <p id="zones-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
     <p class="text-[10px] text-slate-400">
@@ -788,6 +798,7 @@ async function load() {
   renderSummary(sessions);
   renderSessionChips(sessions);
   renderSpeedChart(sessions);
+  renderHrBarChart(sessions);
   renderHrChart(sessions);
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
   initPicker();
@@ -999,6 +1010,75 @@ function renderSpeedChart(sessions) {
 
 // 心拍時系列 chart: 速度比較と同じ多セッション・経過時間 X 軸構造。
 // 各セッションで HC 平均 (solid 太線) + Zones 平均 (dashed) + 推定モデル (dotted, 非表示) を描く。
+// 心拍バーチャート: 各 session の Zones 平均 / max 心拍を 2 本の棒で並べる。
+// HC は心拍未読取 (Refs #50 - permission scope 制限) のため Zones データのみ使用。
+// Zones avg/max が無い session は棒を出さない (= 全 session 無いなら empty 表示)。
+function renderHrBarChart(sessions) {
+  const canvas = document.getElementById("hr-bar-chart");
+  const empty = document.getElementById("hr-bar-empty");
+
+  const labels = [];
+  const avgData = [];
+  const maxData = [];
+  sessions.forEach((sess) => {
+    const zRow = sess.zones && sess.zones.row;
+    const avg = zRow && typeof zRow.avg_heart_rate === "number" ? zRow.avg_heart_rate : null;
+    const mx = zRow && typeof zRow.max_heart_rate === "number" ? zRow.max_heart_rate : null;
+    if (avg === null && mx === null) return;
+    labels.push(sessionLabel(sess));
+    avgData.push(avg);
+    maxData.push(mx);
+  });
+
+  if (labels.length === 0) {
+    empty.classList.remove("hidden");
+    canvas.classList.add("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  canvas.classList.remove("hidden");
+
+  const chart = new Chart(canvas.getContext("2d"), {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "平均",
+          data: avgData,
+          backgroundColor: "#10b981",
+          borderColor: "#059669",
+          borderWidth: 1,
+        },
+        {
+          label: "max",
+          data: maxData,
+          backgroundColor: "#f97316",
+          borderColor: "#ea580c",
+          borderWidth: 1,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => ctx.dataset.label + ": ♥" + (ctx.parsed.y ?? "—") + " bpm",
+          },
+        },
+      },
+      scales: {
+        y: { beginAtZero: false, title: { display: true, text: "bpm" } },
+      },
+    },
+  });
+  // chart 変数は GC されないよう保持 (Chart.js の internal lifecycle 都合)
+  canvas.__hrBarChart = chart;
+}
+
 function renderHrChart(sessions) {
   const canvas = document.getElementById("zones-chart");
   const empty = document.getElementById("zones-empty");

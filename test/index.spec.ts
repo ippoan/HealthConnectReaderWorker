@@ -789,6 +789,8 @@ describe("zonesPayloadToRow", () => {
         activeCalories: { value: 229, unit: "kcal" },
         step: { value: 3704, unit: "歩" },
         averageHeartRate: { value: 160, unit: "bpm" },
+        minHeartRate: { value: 103, unit: "bpm" },
+        maxHeartRate: { value: 169, unit: "bpm" },
       },
       "zones/2026/05-24/C79F6C0C-5F16-4FCB-A626-BECF2AB34F26.json",
       "2026-05-24",
@@ -803,6 +805,8 @@ describe("zonesPayloadToRow", () => {
     expect(row.active_calories).toBe(229);
     expect(row.steps).toBe(3704);
     expect(row.avg_heart_rate).toBe(160);
+    expect(row.min_heart_rate).toBe(103);
+    expect(row.max_heart_rate).toBe(169);
     expect(row.activity_name).toBe("ランニング");
   });
 
@@ -821,6 +825,8 @@ describe("zonesPayloadToRow", () => {
     expect(row.duration_sec).toBeNull();
     expect(row.steps).toBeNull();
     expect(row.activity_name).toBeNull();
+    expect(row.min_heart_rate).toBeNull();
+    expect(row.max_heart_rate).toBeNull();
   });
 });
 
@@ -1084,6 +1090,8 @@ describe("pairHcZones (時刻 overlap で HC × Zones を pair)", () => {
     active_calories: null,
     steps: null,
     avg_heart_rate: null,
+    min_heart_rate: null,
+    max_heart_rate: null,
     raw_key: "k",
     uploaded_at: "2026-05-01T00:00:00Z",
     ...over,
@@ -1298,21 +1306,21 @@ describe("groupAndMatch", () => {
         id: "a", source: "hc", date: "2026-05-10",
         start_at: "2026-05-10T08:00:00Z", end_at: "2026-05-10T08:30:00Z",
         activity_name: null, distance_m: null, duration_sec: null,
-        active_calories: null, steps: null, avg_heart_rate: null,
+        active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
         raw_key: "k1", uploaded_at: "x",
       },
       {
         id: "b", source: "zones", date: "2026-05-10",
         start_at: "2026-05-10T08:05:00Z", end_at: "2026-05-10T08:25:00Z",
         activity_name: null, distance_m: null, duration_sec: null,
-        active_calories: null, steps: null, avg_heart_rate: null,
+        active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
         raw_key: "k2", uploaded_at: "x",
       },
       {
         id: "c", source: "hc", date: "2026-05-11",
         start_at: "2026-05-11T08:00:00Z", end_at: "2026-05-11T08:30:00Z",
         activity_name: null, distance_m: null, duration_sec: null,
-        active_calories: null, steps: null, avg_heart_rate: null,
+        active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
         raw_key: "k3", uploaded_at: "x",
       },
     ];
@@ -1335,7 +1343,7 @@ describe("groupAndMatch", () => {
         start_at: "2026-05-25T19:36:00Z", end_at: "2026-05-25T20:00:00Z",
         activity_name: "トレッドミル",
         distance_m: 4000, duration_sec: 1440,
-        active_calories: null, steps: null, avg_heart_rate: null,
+        active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
         raw_key: "hc/2026/05-25.json", uploaded_at: "x",
       },
       {
@@ -1343,7 +1351,7 @@ describe("groupAndMatch", () => {
         start_at: "2026-05-25T19:40:00Z", end_at: "2026-05-25T19:58:00Z",
         activity_name: "ランニング",
         distance_m: 3500, duration_sec: 1080,
-        active_calories: 220, steps: 3500, avg_heart_rate: 160,
+        active_calories: 220, steps: 3500, avg_heart_rate: 160, min_heart_rate: null, max_heart_rate: null,
         raw_key: "zones/2026/05-25/foo.json", uploaded_at: "x",
       },
     ];
@@ -1364,7 +1372,7 @@ describe("groupAndMatch", () => {
       start_at: `2026-05-26T${s}:00Z`, end_at: `2026-05-26T${e}:00Z`,
       activity_name: source === "hc" ? "トレッドミル" : "ランニング",
       distance_m: null, duration_sec: null,
-      active_calories: null, steps: null, avg_heart_rate: null,
+      active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
       raw_key: `k-${id}`, uploaded_at: "x",
     });
     const rows: WorkoutRow[] = [
@@ -1414,7 +1422,7 @@ describe("groupAndMatch", () => {
         id: "no-start", source: "hc", date: "2026-05-01",
         start_at: null, end_at: null,
         activity_name: null, distance_m: null, duration_sec: null,
-        active_calories: null, steps: null, avg_heart_rate: null,
+        active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
         raw_key: "k", uploaded_at: "x",
       },
     ];
@@ -1456,6 +1464,8 @@ describe("POST /_admin/reindex", () => {
       name: "ランニング",
       distance: { value: 4.8, unit: "km" },
       averageHeartRate: { value: 160, unit: "bpm" },
+      minHeartRate: { value: 110, unit: "bpm" },
+      maxHeartRate: { value: 178, unit: "bpm" },
     };
     await env.R2.put(
       "zones/2026/03-15/FFFFFFFF-1111-2222-3333-444444444444.json",
@@ -1495,6 +1505,18 @@ describe("POST /_admin/reindex", () => {
     const day = wj.days.find((d) => d.date === "2026-03-15");
     expect(day).toBeTruthy();
     expect(day!.matched_count).toBe(1);
+
+    // min/max HR が D1 に backfill されている
+    const zRow = await env.DB.prepare(
+      "SELECT avg_heart_rate, min_heart_rate, max_heart_rate FROM workouts WHERE source='zones' AND id=?",
+    ).bind("FFFFFFFF-1111-2222-3333-444444444444").first<{
+      avg_heart_rate: number | null;
+      min_heart_rate: number | null;
+      max_heart_rate: number | null;
+    }>();
+    expect(zRow?.avg_heart_rate).toBe(160);
+    expect(zRow?.min_heart_rate).toBe(110);
+    expect(zRow?.max_heart_rate).toBe(178);
   });
 
   it("scope filter: prefix=zones/ だけ走らせると hc は触らない", async () => {
@@ -1928,18 +1950,27 @@ describe("POST /_admin/migrate", () => {
       env,
     );
     expect(r1.status).toBe(200);
-    const j1 = (await r1.json()) as { ok: boolean; ran: number; statements: number };
+    const j1 = (await r1.json()) as {
+      ok: boolean; ran: number; statements: number; skipped: number;
+    };
     expect(j1.ok).toBe(true);
-    expect(j1.ran).toBe(j1.statements);
     expect(j1.statements).toBeGreaterThan(0);
+    // CREATE 系は全部走る (ran)、ALTER ADD COLUMN は CREATE が完全 schema を
+    // 立てた直後だと "duplicate column" で skipped 扱い → ran + skipped = statements。
+    expect(j1.ran + j1.skipped).toBe(j1.statements);
 
-    // re-run is safe (IF NOT EXISTS)
+    // re-run is safe (IF NOT EXISTS + ALTER duplicate-column skip)
     const r2 = await app.request(
       "/_admin/migrate",
       { method: "POST", headers: auth() },
       env,
     );
     expect(r2.status).toBe(200);
+    const j2 = (await r2.json()) as {
+      ok: boolean; ran: number; statements: number; skipped: number;
+    };
+    expect(j2.ok).toBe(true);
+    expect(j2.ran + j2.skipped).toBe(j2.statements);
 
     // workouts テーブルが実在し、INSERT できる
     await env.DB.prepare(
