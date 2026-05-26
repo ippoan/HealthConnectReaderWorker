@@ -696,13 +696,20 @@ export const WORKOUT_DETAIL_HTML = `<!doctype html>
   </section>
 
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
-    <h2 class="font-semibold">速度 + 心拍 (合成、group 別)</h2>
+    <div class="flex items-center justify-between">
+      <h2 class="font-semibold">速度 + 心拍 (合成、group 別)</h2>
+      <button id="export-json-btn" type="button"
+        class="text-[11px] px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-800 text-white">
+        📥 JSON
+      </button>
+    </div>
     <p id="combined-empty" class="text-xs text-slate-500 hidden">データ無し</p>
     <p class="text-[10px] text-slate-400">
       左軸=速度 (km/h, session 別の平均線)、右軸=心拍 (Zones 平均=下弦 / max=上弦 の塗り帯)。
       上の chip の <span class="font-semibold">G1/G2 ボタン</span>を押して
       session を group に振分け、各 group ごとに 1 グラフを縦に並べる
       (上下で比較しやすいよう Y 軸スケールは全グラフで共通)。
+      右の「📥 JSON」で他 AI 向け分析データ (group 別 summary) を download。
     </p>
     <div id="combined-charts-container" class="space-y-3"></div>
   </section>
@@ -806,6 +813,117 @@ async function load() {
   renderHrChart(sessions);
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
   initPicker();
+  initExportJson();
+}
+
+// 「📥 JSON」ボタン: 現在の sessions を group 別に整形して download。
+// 他 AI に貼って分析させる用途を想定 → 機械可読 + 必要十分な field 数。
+// Refs ippoan/HealthConnectReaderWorker#58
+function initExportJson() {
+  const btn = document.getElementById("export-json-btn");
+  if (!btn) return;
+  btn.onclick = () => {
+    const sessions = window.__sessions || [];
+    const state = loadGroupState();
+    const groups = new Map();
+    for (const sess of sessions) {
+      const g = getSessionGroup(sess, state);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(sess);
+    }
+    const exported = {
+      schema_version: 1,
+      exported_at: new Date().toISOString(),
+      timezone: "Asia/Tokyo (+09:00)",
+      notes: [
+        "Each group is a user-assigned bucket (G1..G4) of sessions for cross-group comparison.",
+        "speed.avg_kmh is computed from distance_m / duration_sec (HC preferred, Zones fallback).",
+        "heart_rate is Zones-only (Apple Watch); HC has no HR readings in this app's scope.",
+      ],
+      groups: [...groups.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([g, arr]) => ({
+          group: "G" + g,
+          session_count: arr.length,
+          sessions: arr.map((sess) => buildSessionExport(sess)),
+          group_summary: buildGroupSummary(arr),
+        })),
+    };
+    const blob = new Blob([JSON.stringify(exported, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "workout-export-" + new Date().toISOString().replace(/[:.]/g, "-") + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+}
+
+function buildSessionExport(sess) {
+  const hc = sess.hc && sess.hc.row;
+  const z = sess.zones && sess.zones.row;
+  const startIso = (hc && hc.start_at) || (z && z.start_at) || null;
+  const endIso = (hc && hc.end_at) || (z && z.end_at) || null;
+  const speedSrc = hc && typeof hc.distance_m === "number" && typeof hc.duration_sec === "number" && hc.duration_sec > 0 ? "hc" :
+                   (z && typeof z.distance_m === "number" && typeof z.duration_sec === "number" && z.duration_sec > 0 ? "zones" : null);
+  const speedRow = speedSrc === "hc" ? hc : (speedSrc === "zones" ? z : null);
+  const avgKmh = speedRow ? (speedRow.distance_m / 1000) / (speedRow.duration_sec / 3600) : null;
+  return {
+    label: sessionLabel(sess),
+    start_at: startIso,
+    end_at: endIso,
+    duration_sec: speedRow ? speedRow.duration_sec : null,
+    activity_name: (hc && hc.activity_name) || (z && z.activity_name) || null,
+    distance: speedRow ? { value_m: speedRow.distance_m, source: speedSrc } : null,
+    speed: avgKmh !== null ? { avg_kmh: round(avgKmh, 3), source: speedSrc } : null,
+    heart_rate: z ? {
+      avg_bpm: typeof z.avg_heart_rate === "number" ? z.avg_heart_rate : null,
+      min_bpm: typeof z.min_heart_rate === "number" ? z.min_heart_rate : null,
+      max_bpm: typeof z.max_heart_rate === "number" ? z.max_heart_rate : null,
+      source: "zones",
+    } : null,
+    calories_kcal: z && typeof z.active_calories === "number" ? z.active_calories : null,
+    steps: z && typeof z.steps === "number" ? z.steps : null,
+    ids: {
+      hc_id: hc ? hc.id : null,
+      zones_id: z ? z.id : null,
+    },
+  };
+}
+
+function buildGroupSummary(arr) {
+  let totalDistM = 0, totalDurSec = 0;
+  let hrAvgs = [], hrMaxes = [], hrMins = [];
+  for (const sess of arr) {
+    const hc = sess.hc && sess.hc.row;
+    const z = sess.zones && sess.zones.row;
+    const row = (hc && typeof hc.distance_m === "number" && typeof hc.duration_sec === "number") ? hc :
+                ((z && typeof z.distance_m === "number" && typeof z.duration_sec === "number") ? z : null);
+    if (row) { totalDistM += row.distance_m; totalDurSec += row.duration_sec; }
+    if (z) {
+      if (typeof z.avg_heart_rate === "number") hrAvgs.push(z.avg_heart_rate);
+      if (typeof z.max_heart_rate === "number") hrMaxes.push(z.max_heart_rate);
+      if (typeof z.min_heart_rate === "number") hrMins.push(z.min_heart_rate);
+    }
+  }
+  const overallSpeedKmh = totalDurSec > 0 ? (totalDistM / 1000) / (totalDurSec / 3600) : null;
+  return {
+    total_distance_m: round(totalDistM, 1),
+    total_duration_sec: totalDurSec,
+    overall_avg_speed_kmh: overallSpeedKmh !== null ? round(overallSpeedKmh, 3) : null,
+    hr_avg_of_avg: hrAvgs.length ? round(hrAvgs.reduce((a, b) => a + b, 0) / hrAvgs.length, 1) : null,
+    hr_max_of_max: hrMaxes.length ? Math.max.apply(null, hrMaxes) : null,
+    hr_min_of_min: hrMins.length ? Math.min.apply(null, hrMins) : null,
+  };
+}
+
+function round(n, digits) {
+  const p = Math.pow(10, digits);
+  return Math.round(n * p) / p;
 }
 
 // セッションを Gn (n=1..MAX_GROUPS) に手動アサインする state。
