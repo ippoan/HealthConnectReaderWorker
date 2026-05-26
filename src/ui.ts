@@ -849,6 +849,33 @@ function renderSpeedChart(j) {
     });
   }
 
+  // 3. 推定モデル: 「最初 T_ramp 秒で 0→V まで線形加速 → V で cruise」を仮定し
+  //    平均速度から逆算で V_target を出す。
+  //      avg = V × (T_total − T_ramp/2) / T_total
+  //      → V = avg × T_total / (T_total − T_ramp/2)
+  //    短い workout (< 2分) は ramp 区間が支配的になり推定が暴れるので skip。
+  if (hcAvg !== null && xMin !== undefined && xMax !== undefined) {
+    const totalSec = (xMax - xMin) / 1000;
+    const tRamp = Math.min(60, totalSec * 0.1);  // 60s or 全体 10% の小さい方
+    if (totalSec > 120) {
+      const vTarget = hcAvg * totalSec / (totalSec - tRamp / 2);
+      const rampEndX = xMin + tRamp * 1000;
+      datasets.push({
+        label: "推定モデル " + vTarget.toFixed(2) + " km/h (ramp " + Math.round(tRamp) + "s)",
+        data: [
+          { x: xMin, y: 0 },
+          { x: rampEndX, y: vTarget },
+          { x: xMax, y: vTarget },
+        ],
+        borderColor: "#94a3b8",
+        borderDash: [2, 3],
+        pointRadius: 0,
+        borderWidth: 1.5,
+        hidden: true,   // default は非表示。chip で出す
+      });
+    }
+  }
+
   if (datasets.length === 0) {
     empty.classList.remove("hidden");
     canvas.classList.add("hidden");
@@ -895,7 +922,9 @@ function renderSpeedChart(j) {
         btn.style.backgroundColor = visible ? ds.borderColor : "#fff";
         btn.style.opacity = visible ? "1" : "0.55";
       };
-      setStyle(true);
+      // dataset の hidden 初期値を尊重 (推定モデルは default 非表示)
+      const initialVisible = !ds.hidden;
+      setStyle(initialVisible);
       btn.textContent = ds.label;
       btn.addEventListener("click", () => {
         const meta = chart.getDatasetMeta(idx);
