@@ -1145,6 +1145,50 @@ describe("groupAndMatch", () => {
     expect(may10.hc_count).toBe(1);
     expect(may10.zones_count).toBe(1);
   });
+
+  it("regroups by JST date so UTC-evening rows roll to next JST day (= matched)", () => {
+    // UTC 2026-05-25T19:36Z = JST 2026-05-26T04:36
+    // UTC 2026-05-25T20:00Z = JST 2026-05-26T05:00
+    // 両方とも JST date 2026-05-26 に乗るので、DB 上 date=2026-05-25 (UTC) でも
+    // groupAndMatch は 2026-05-26 に合流させて matched にする。
+    const rows: WorkoutRow[] = [
+      {
+        id: "hc-utc-evening", source: "hc", date: "2026-05-25",
+        start_at: "2026-05-25T19:36:00Z", end_at: "2026-05-25T20:00:00Z",
+        activity_name: "トレッドミル",
+        distance_m: 4000, duration_sec: 1440,
+        active_calories: null, steps: null, avg_heart_rate: null,
+        raw_key: "hc/2026/05-25.json", uploaded_at: "x",
+      },
+      {
+        id: "z-utc-evening", source: "zones", date: "2026-05-25",
+        start_at: "2026-05-25T19:40:00Z", end_at: "2026-05-25T19:58:00Z",
+        activity_name: "ランニング",
+        distance_m: 3500, duration_sec: 1080,
+        active_calories: 220, steps: 3500, avg_heart_rate: 160,
+        raw_key: "zones/2026/05-25/foo.json", uploaded_at: "x",
+      },
+    ];
+    const out = groupAndMatch(rows);
+    expect(out.map((d) => d.date)).toEqual(["2026-05-26"]); // JST date
+    expect(out[0].matched_count).toBe(1);
+    expect(out[0].hc_count).toBe(1);
+    expect(out[0].zones_count).toBe(1);
+  });
+
+  it("rows without start_at fall back to DB date (UTC)", () => {
+    const rows: WorkoutRow[] = [
+      {
+        id: "no-start", source: "hc", date: "2026-05-01",
+        start_at: null, end_at: null,
+        activity_name: null, distance_m: null, duration_sec: null,
+        active_calories: null, steps: null, avg_heart_rate: null,
+        raw_key: "k", uploaded_at: "x",
+      },
+    ];
+    const out = groupAndMatch(rows);
+    expect(out[0].date).toBe("2026-05-01");
+  });
 });
 
 describe("POST /_admin/reindex", () => {
