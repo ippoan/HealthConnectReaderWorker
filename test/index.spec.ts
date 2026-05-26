@@ -1487,6 +1487,74 @@ describe("GET /workout (HTML)", () => {
   });
 });
 
+describe("GET /api/known-hc-ids", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request("/api/known-hc-ids", {}, env);
+    expect(r.status).toBe(401);
+  });
+
+  it("400 on days out of range", async () => {
+    const r = await app.request("/api/known-hc-ids?days=0", { headers: auth() }, env);
+    expect(r.status).toBe(400);
+  });
+
+  it("returns ids of existing HC rows in the date range", async () => {
+    // 既存 HC 行を仕込む (date=今日付近)
+    const today = new Date();
+    const yyyy = today.getUTCFullYear();
+    const mm = String(today.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(today.getUTCDate()).padStart(2, "0");
+    const dateStr = `${yyyy}-${mm}-${dd}`;
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, raw_key, uploaded_at) VALUES (?,?,?,?,?)",
+    )
+      .bind("hc_known_1", "hc", dateStr, "k1", new Date().toISOString())
+      .run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, raw_key, uploaded_at) VALUES (?,?,?,?,?)",
+    )
+      .bind("hc_known_2", "hc", dateStr, "k2", new Date().toISOString())
+      .run();
+
+    const r = await app.request("/api/known-hc-ids?days=7", { headers: auth() }, env);
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { days: number; count: number; ids: string[] };
+    expect(j.days).toBe(7);
+    expect(j.ids).toContain("hc_known_1");
+    expect(j.ids).toContain("hc_known_2");
+  });
+});
+
+describe("POST /api/hc-session-id", () => {
+  it("returns deterministic id for same input", async () => {
+    const body = JSON.stringify({ startTime: "2026-06-01T10:00:00Z", exerciseType: 56 });
+    const r1 = await app.request(
+      "/api/hc-session-id",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    const r2 = await app.request(
+      "/api/hc-session-id",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body },
+      env,
+    );
+    expect(r1.status).toBe(200);
+    const j1 = (await r1.json()) as { id: string };
+    const j2 = (await r2.json()) as { id: string };
+    expect(j1.id).toMatch(/^hc_[0-9a-f]{16}$/);
+    expect(j1.id).toBe(j2.id);
+  });
+
+  it("400 on missing startTime", async () => {
+    const r = await app.request(
+      "/api/hc-session-id",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body: "{}" },
+      env,
+    );
+    expect(r.status).toBe(400);
+  });
+});
+
 describe("Auth: JWT cookie path", () => {
   // HS256 sign helper (test only)
   async function signJwt(payload: Record<string, unknown>, secret: string): Promise<string> {
