@@ -1354,6 +1354,60 @@ describe("groupAndMatch", () => {
     expect(out[0].zones_count).toBe(1);
   });
 
+  it("splits back-to-back HC + multi Zones into per-pair matches (Refs #50)", () => {
+    // 2026-05-27 の実データ再現: HC が背中合わせ 4 個、Zones が 4 個。
+    // 旧 union-find は 1 つの mega group (4 HC × 4 Zones) に統合してしまうが、
+    // 貪欲 1:1 マッチングなら 4 個の独立した 1×1 matched group になる。
+    // (UTC 19:?? = JST 04:?? なので JST 2026-05-27 にグルーピングされる)
+    const mk = (id: string, source: "hc" | "zones", s: string, e: string): WorkoutRow => ({
+      id, source, date: "2026-05-26",
+      start_at: `2026-05-26T${s}:00Z`, end_at: `2026-05-26T${e}:00Z`,
+      activity_name: source === "hc" ? "トレッドミル" : "ランニング",
+      distance_m: null, duration_sec: null,
+      active_calories: null, steps: null, avg_heart_rate: null,
+      raw_key: `k-${id}`, uploaded_at: "x",
+    });
+    const rows: WorkoutRow[] = [
+      // HC: 背中合わせ (end == 次の start)
+      mk("hc1", "hc", "19:38", "19:44"),
+      mk("hc2", "hc", "19:44", "20:01"),
+      mk("hc3", "hc", "20:01", "20:06"),
+      mk("hc4", "hc", "20:06", "20:22"),
+      // Zones: 4 個 (各 1 つの HC と最大 overlap)
+      mk("z1", "zones", "19:34", "19:40"),
+      mk("z2", "zones", "19:41", "19:57"),
+      mk("z3", "zones", "19:59", "20:04"),
+      mk("z4", "zones", "20:06", "20:22"),
+    ];
+    const out = groupAndMatch(rows);
+    expect(out).toHaveLength(1);
+    const day = out[0];
+    expect(day.date).toBe("2026-05-27"); // JST
+    // 4 つの 1×1 matched group になっているはず (mega group 1 つではない)
+    expect(day.matched_count).toBe(4);
+    // hc_count / zones_count は matched 内の row 数も含む合算 (db.ts:757-764)。
+    // 全 4 HC × 4 Zones が matched (4 個の 1×1 group) なので hc=4, zones=4。
+    expect(day.hc_count).toBe(4);
+    expect(day.zones_count).toBe(4);
+    // hc_only / zones_only は 0 (全てペアされた)
+    expect(day.items.filter((it) => it.type === "hc_only")).toHaveLength(0);
+    expect(day.items.filter((it) => it.type === "zones_only")).toHaveLength(0);
+    const matched = day.items.filter((it) => it.type === "matched");
+    expect(matched).toHaveLength(4);
+    for (const m of matched) {
+      if (m.type !== "matched") continue;
+      expect(m.hcs.length).toBe(1);
+      expect(m.zoneses.length).toBe(1);
+    }
+    // 最大 overlap の pair (hc4↔z4 = 16 min) と (hc2↔z2 = 13 min) が確実に
+    // 同一グループに入る (= 貪欲が正しく最大 overlap を優先している)
+    const pairs = matched
+      .filter((m): m is Extract<typeof m, { type: "matched" }> => m.type === "matched")
+      .map((m) => [m.hcs[0].id, m.zoneses[0].id].sort().join("+"));
+    expect(pairs).toContain(["hc4", "z4"].sort().join("+"));
+    expect(pairs).toContain(["hc2", "z2"].sort().join("+"));
+  });
+
   it("rows without start_at fall back to DB date (UTC)", () => {
     const rows: WorkoutRow[] = [
       {
