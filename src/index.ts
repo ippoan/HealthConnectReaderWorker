@@ -156,7 +156,17 @@ app.post("/api/upload", apiAuth, async (c) => {
   if (parsed === null || typeof parsed !== "object") {
     return c.json({ error: "invalid_json" }, 400);
   }
-  const { key, yyyy, mmdd } = uploadKeyFor(new Date());
+  // payload に含まれる `date` (Android が JST `LocalDate.now()` で生成) を
+  // 優先して key を決める。Worker 側で `new Date()` を使うと UTC 基準になるため、
+  // JST 朝 (= UTC 前日 15:00-23:59) に「今すぐ Upload」を押すと当日 data が
+  // 前日 key に merge され、UI 上「今日のがアップロードできない」状態になる。
+  // 欠落 / 不正時は従来通り UTC `new Date()` に fallback。
+  // Refs ippoan/HealthConnectReaderWorker#48
+  const dateFromPayload = (parsed as { date?: unknown }).date;
+  const keyInfo =
+    (typeof dateFromPayload === "string" ? uploadKeyForDateString(dateFromPayload) : null)
+    ?? uploadKeyFor(new Date());
+  const { key, yyyy, mmdd } = keyInfo;
   const date = `${yyyy}-${mmdd}`;
   // 「今すぐ Upload」は HC の "today" snapshot を投げてくる。同 key に既に
   // (= upload-batch でマージ済みの) sessions が入っている場合に丸ごと
