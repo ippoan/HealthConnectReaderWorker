@@ -193,7 +193,14 @@ function authHeaders() {
   return {};
 }
 function authFetchInit(extra) {
-  return Object.assign({ credentials: "include", headers: Object.assign({}, authHeaders(), extra && extra.headers || {}) }, extra || {});
+  // 注意: 外側で Object.assign(target, extra) すると extra.headers が
+  // target.headers を**そのまま上書き**し Authorization が消える
+  // (Android WebView で 401 顕在化、PWA は cookie credentials で覆われ
+  // masked) (Refs #22)。headers は再 assemble して最後に設定する。
+  extra = extra || {};
+  const init = Object.assign({ credentials: "include" }, extra);
+  init.headers = Object.assign({}, authHeaders(), extra.headers || {});
+  return init;
 }
 
 async function refreshHistory() {
