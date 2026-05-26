@@ -1240,6 +1240,131 @@ describe("POST /_admin/reindex", () => {
   });
 });
 
+describe("GET /api/workout (突合 detail)", () => {
+  it("400 when both hc and zones are missing", async () => {
+    const r = await app.request("/api/workout", { headers: auth() }, env);
+    expect(r.status).toBe(400);
+  });
+
+  it("401 without bearer", async () => {
+    const r = await app.request("/api/workout?hc=x", {}, env);
+    expect(r.status).toBe(401);
+  });
+
+  it("404 when neither hc nor zones row exists", async () => {
+    const r = await app.request(
+      "/api/workout?hc=no-such-id&zones=also-none",
+      { headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(404);
+  });
+
+  it("returns combined { hc, zones } row + raw R2 payload", async () => {
+    const hcRawKey = "hc/2026/06-20.json";
+    const hcPayload = {
+      date: "2026-06-20",
+      sessions: [{
+        startTime: "2026-06-20T05:00:00Z",
+        endTime: "2026-06-20T05:22:00Z",
+        exerciseType: 56,
+        title: null,
+      }],
+      distances: [{
+        startTime: "2026-06-20T05:00:00Z",
+        endTime: "2026-06-20T05:22:00Z",
+        km: 4.0,
+      }],
+      speeds: [{
+        startTime: "2026-06-20T05:00:00Z",
+        endTime: "2026-06-20T05:22:00Z",
+        samples: [
+          { time: "2026-06-20T05:00:00Z", kmh: 8.0 },
+          { time: "2026-06-20T05:10:00Z", kmh: 11.0 },
+          { time: "2026-06-20T05:20:00Z", kmh: 10.0 },
+        ],
+      }],
+    };
+    await env.R2.put(hcRawKey, JSON.stringify(hcPayload));
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, distance_m, duration_sec, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ).bind(
+      "detail-hc",
+      "hc",
+      "2026-06-20",
+      "2026-06-20T05:00:00Z",
+      "2026-06-20T05:22:00Z",
+      "ランニング",
+      4000,
+      1320,
+      hcRawKey,
+      new Date().toISOString(),
+    ).run();
+
+    const zRawKey = "zones/2026/06-20/AAAAAAAA-1111-2222-3333-DDDDDDDDDDDD.json";
+    const zPayload = {
+      uuid: "AAAAAAAA-1111-2222-3333-DDDDDDDDDDDD",
+      startDate: "2026-06-20T05:00:30Z",
+      endDate: "2026-06-20T05:21:30Z",
+      name: "トレッドミル",
+      averageHeartRate: { value: 158, unit: "bpm" },
+      zones: {
+        zone1: { duration: { value: 60, unit: "sec" } },
+        zone2: { duration: { value: 180, unit: "sec" } },
+        zone3: { duration: { value: 540, unit: "sec" } },
+        zone4: { duration: { value: 360, unit: "sec" } },
+        zone5: { duration: { value: 120, unit: "sec" } },
+      },
+    };
+    await env.R2.put(zRawKey, JSON.stringify(zPayload));
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO workouts (id, source, date, start_at, end_at, activity_name, avg_heart_rate, raw_key, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+    ).bind(
+      "detail-z",
+      "zones",
+      "2026-06-20",
+      "2026-06-20T05:00:30Z",
+      "2026-06-20T05:21:30Z",
+      "トレッドミル",
+      158,
+      zRawKey,
+      new Date().toISOString(),
+    ).run();
+
+    const r = await app.request(
+      "/api/workout?hc=detail-hc&zones=detail-z",
+      { headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { hc: any; zones: any };
+    expect(j.hc.row.id).toBe("detail-hc");
+    expect(j.hc.raw.speeds[0].samples.length).toBe(3);
+    expect(j.zones.row.id).toBe("detail-z");
+    expect(j.zones.raw.zones.zone3.duration.value).toBe(540);
+  });
+});
+
+describe("GET /workout (HTML)", () => {
+  it("200 HTML with chart canvases when authenticated", async () => {
+    const r = await app.request(
+      "/workout?hc=x&zones=y",
+      { headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const body = await r.text();
+    expect(body).toContain("speed-chart");
+    expect(body).toContain("zones-chart");
+    expect(body).toContain("chart.js");
+  });
+
+  it("302 redirect when unauthenticated", async () => {
+    const r = await app.request("/workout?hc=x", {}, env);
+    expect(r.status).toBe(302);
+  });
+});
+
 describe("Auth: JWT cookie path", () => {
   // HS256 sign helper (test only)
   async function signJwt(payload: Record<string, unknown>, secret: string): Promise<string> {
