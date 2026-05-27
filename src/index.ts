@@ -23,6 +23,7 @@ import {
   groupAndMatch,
   hcPayloadToRows,
   hcSessionId,
+  listGhapiFromDb,
   listKnownHcIds,
   listWorkoutsSinceDays,
   listZonesFromDb,
@@ -32,7 +33,13 @@ import {
   upsertWorkout,
   zonesPayloadToRow,
 } from "./db";
-import { readUploadToken, type AppEnv } from "./env";
+import {
+  readGhapiWebhookAuthToken,
+  readInternalSharedSecret,
+  readUploadToken,
+  type AppEnv,
+  type Env,
+} from "./env";
 import { applySchema } from "./migrations";
 import {
   summarizeHistory,
@@ -769,6 +776,173 @@ app.post("/api/pair/delete", apiAuth, async (c) => {
   return c.json({ error: "missing_ids" }, 400);
 });
 
+// =============================================================================
+// Google Health API (ghapi) routes
+// Refs ippoan/HealthConnectReaderWorker#60
+// =============================================================================
+
+/**
+ * auth-worker (`auth.ippoan.org`) の Google Health 専用 OAuth redirect URL を組む。
+ * redirect_uri は post-OAuth で auth-worker → 302 で戻る先 (PWA UI)。
+ */
+function buildGhapiConnectUrl(requestUrl: string): string {
+  const u = new URL(requestUrl);
+  const back = `${u.origin}/api/ghapi/connected`;
+  return `https://auth.ippoan.org/oauth/ghapi/redirect?redirect_uri=${encodeURIComponent(back)}`;
+}
+
+function getGhapiStub(env: Env) {
+  if (!env.GHAPI_SUBSCRIBER) return null;
+  const id = env.GHAPI_SUBSCRIBER.idFromName("default");
+  return env.GHAPI_SUBSCRIBER.get(id);
+}
+
+/**
+ * `GET /ghapi/connect` — auth-worker の Google Health OAuth redirect へ 302 飛ばす。
+ * cookie auth (= PWA / browser からの利用) 必須。
+ */
+app.get("/ghapi/connect", async (c) => {
+  if (!(await verifyAuthCookie(c.env, c.req.header("cookie") ?? ""))) {
+    return c.redirect(buildAuthLoginUrl(c.req.url), 302);
+  }
+  return c.redirect(buildGhapiConnectUrl(c.req.url), 302);
+});
+
+/**
+ * `GET /api/ghapi/connected` — auth-worker からの post-OAuth landing。
+ * tokens は別経路 (`POST /api/ghapi/store-tokens`) で先に届いている前提で、
+ * ここでは「接続完了」HTML を返すだけ。
+ */
+app.get("/api/ghapi/connected", async (c) => {
+  if (!(await verifyAuthCookie(c.env, c.req.header("cookie") ?? ""))) {
+    return c.redirect(buildAuthLoginUrl(c.req.url), 302);
+  }
+  return c.html(
+    `<!doctype html><meta charset="utf-8"><title>Google Health 接続完了</title>
+<body style="font-family:system-ui;padding:2rem;text-align:center">
+<h1>✓ Google Health 接続完了</h1>
+<p><a href="/">← トップへ戻る</a></p></body>`,
+  );
+});
+
+/**
+ * `POST /api/ghapi/store-tokens` — auth-worker が code→tokens 交換後にここへ
+ * `{ refresh_token, healthUserId }` を POST してくる。
+ *
+ * 認証: `Authorization: Bearer ${INTERNAL_SHARED_SECRET}`。auth-worker と
+ * hcreader-worker に同じ値を投入する。
+ *
+ * DO `GhapiSubscriberDO/default` の `/store-tokens` に丸ごと forward する。
+ */
+app.post("/api/ghapi/store-tokens", async (c) => {
+  const expected = await readInternalSharedSecret(c.env);
+  if (!expected) return c.json({ error: "server_misconfigured" }, 500);
+  const header = c.req.header("authorization") ?? "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m || !constantTimeEqualStr(m[1], expected)) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  const stub = getGhapiStub(c.env);
+  if (!stub) return c.json({ error: "ghapi_do_not_bound" }, 500);
+
+  const url = new URL(c.req.url);
+  const webhookUrl = `${url.origin}/api/ghapi/webhook`;
+  const webhookAuth = await readGhapiWebhookAuthToken(c.env);
+
+  // body は touch せず DO に raw forward (refresh_token / healthUserId 検証は DO 側)
+  const rawBody = await c.req.raw.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return c.json({ error: "expected_object" }, 400);
+  }
+  const enriched = JSON.stringify({
+    ...(parsed as Record<string, unknown>),
+    webhookUrl,
+    webhookAuth,
+  });
+  const resp = await stub.fetch(
+    new Request("https://ghapi-do/store-tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: enriched,
+    }),
+  );
+  return new Response(await resp.text(), {
+    status: resp.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
+
+/**
+ * `POST /api/ghapi/webhook` — Google から data 変更通知が飛んでくる endpoint。
+ *
+ * 認証: subscription 作成時に endpointAuthorization として登録した値が
+ * `Authorization: Bearer` で送られてくる前提 (= `GHAPI_WEBHOOK_AUTH_TOKEN`)。
+ *
+ * 受信したら **即 204 を返す** + ctx.waitUntil で DO に投げる
+ * (= Google 側のリトライストームを避ける)。
+ */
+app.post("/api/ghapi/webhook", async (c) => {
+  const expected = await readGhapiWebhookAuthToken(c.env);
+  if (!expected) return c.json({ error: "server_misconfigured" }, 500);
+  const header = c.req.header("authorization") ?? "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m || !constantTimeEqualStr(m[1], expected)) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  const stub = getGhapiStub(c.env);
+  if (!stub) return c.json({ error: "ghapi_do_not_bound" }, 500);
+
+  const rawBody = await c.req.raw.text();
+  c.executionCtx.waitUntil(
+    stub
+      .fetch(
+        new Request("https://ghapi-do/webhook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: rawBody,
+        }),
+      )
+      .then(() => undefined)
+      .catch((e) => console.error("ghapi_webhook_do_fetch_failed", e)),
+  );
+  return new Response(null, { status: 204 });
+});
+
+/**
+ * `GET /api/ghapi/status` — UI 用接続状態 + 直近イベント + 取込済 workout 件数。
+ */
+app.get("/api/ghapi/status", apiAuth, async (c) => {
+  const stub = getGhapiStub(c.env);
+  if (!stub) {
+    return c.json({ enabled: false, connected: false });
+  }
+  const resp = await stub.fetch(new Request("https://ghapi-do/status"));
+  const status = (await resp.json()) as Record<string, unknown>;
+  const recent = await listGhapiFromDb(c.env.DB, 20);
+  return c.json({ enabled: true, ...status, recent_count: recent.length, recent });
+});
+
+/**
+ * `POST /api/ghapi/disconnect` — revoke + subscription 削除 + DO storage clear。
+ */
+app.post("/api/ghapi/disconnect", apiAuth, async (c) => {
+  const stub = getGhapiStub(c.env);
+  if (!stub) return c.json({ ok: true, noop: "ghapi_do_not_bound" });
+  const resp = await stub.fetch(
+    new Request("https://ghapi-do/disconnect", { method: "POST" }),
+  );
+  return new Response(await resp.text(), {
+    status: resp.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
+
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
 app.onError((err, c) => {
@@ -777,3 +951,5 @@ app.onError((err, c) => {
 });
 
 export default app;
+
+export { GhapiSubscriberDO } from "./durable_objects/ghapi-subscriber-do";

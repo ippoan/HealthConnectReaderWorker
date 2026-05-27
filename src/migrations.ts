@@ -14,7 +14,7 @@
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS workouts (
     id TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('hc', 'zones')),
+    source TEXT NOT NULL CHECK (source IN ('hc', 'zones', 'ghapi')),
     date TEXT NOT NULL,
     start_at TEXT,
     end_at TEXT,
@@ -62,6 +62,73 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
 ];
 
 /**
+ * `workouts.source` の CHECK constraint を緩めるリビルド。
+ *
+ * 既存 DB は `CHECK (source IN ('hc','zones'))` で生成されており SQLite は
+ * CHECK の ALTER を持たないため、`'ghapi'` を許す新テーブルに rename-copy で
+ * 差し替える。新環境 (= 上の CREATE TABLE が走った直後) では既に
+ * `'ghapi'` を含む CHECK が入っているので no-op になる。
+ *
+ * idempotent 化:
+ *   - sqlite_master の `workouts` 行の `sql` カラムを inspect
+ *   - `'ghapi'` 文字列を含めば skip (既に新 schema)
+ *   - 含まなければ tx で rebuild
+ *
+ * Refs ippoan/HealthConnectReaderWorker#60
+ */
+export async function widenWorkoutsSourceCheck(
+  db: D1Database,
+): Promise<{ rebuilt: boolean }> {
+  const row = await db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workouts'",
+    )
+    .first<{ sql: string | null }>();
+  if (!row || !row.sql) return { rebuilt: false };
+  if (row.sql.includes("'ghapi'")) return { rebuilt: false };
+
+  await db.batch([
+    db.prepare(`CREATE TABLE workouts_new (
+      id TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('hc', 'zones', 'ghapi')),
+      date TEXT NOT NULL,
+      start_at TEXT,
+      end_at TEXT,
+      activity_name TEXT,
+      distance_m REAL,
+      duration_sec INTEGER,
+      active_calories REAL,
+      steps INTEGER,
+      avg_heart_rate INTEGER,
+      min_heart_rate INTEGER,
+      max_heart_rate INTEGER,
+      raw_key TEXT NOT NULL,
+      uploaded_at TEXT NOT NULL,
+      PRIMARY KEY (source, id)
+    )`),
+    db.prepare(`INSERT INTO workouts_new
+      (id, source, date, start_at, end_at, activity_name, distance_m,
+       duration_sec, active_calories, steps, avg_heart_rate, min_heart_rate,
+       max_heart_rate, raw_key, uploaded_at)
+      SELECT id, source, date, start_at, end_at, activity_name, distance_m,
+        duration_sec, active_calories, steps, avg_heart_rate, min_heart_rate,
+        max_heart_rate, raw_key, uploaded_at FROM workouts`),
+    db.prepare(`DROP TABLE workouts`),
+    db.prepare(`ALTER TABLE workouts_new RENAME TO workouts`),
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_workouts_date ON workouts(date)`,
+    ),
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_workouts_start_at ON workouts(start_at)`,
+    ),
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_workouts_source_date ON workouts(source, date)`,
+    ),
+  ]);
+  return { rebuilt: true };
+}
+
+/**
  * `SCHEMA_STATEMENTS` を D1 に順次適用する。`db.batch()` は 1 transaction で
  * まとめて走るが、CREATE TABLE / CREATE INDEX 系は逐次 prepare → run でも
  * 速度差が無視できるレベルなので素直に for ループにする (failure 時の
@@ -69,7 +136,12 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
  */
 export async function applySchema(
   db: D1Database,
-): Promise<{ ran: number; statements: number; skipped: number }> {
+): Promise<{
+  ran: number;
+  statements: number;
+  skipped: number;
+  rebuilt: boolean;
+}> {
   let ran = 0;
   let skipped = 0;
   for (const sql of SCHEMA_STATEMENTS) {
@@ -88,5 +160,6 @@ export async function applySchema(
       throw err;
     }
   }
-  return { ran, statements: SCHEMA_STATEMENTS.length, skipped };
+  const { rebuilt } = await widenWorkoutsSourceCheck(db);
+  return { ran, statements: SCHEMA_STATEMENTS.length, skipped, rebuilt };
 }

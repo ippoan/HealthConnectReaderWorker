@@ -68,6 +68,53 @@
       "binding": "JWT_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "JWT_SECRET"
+    },
+    // Google Health API integration (Refs ippoan/HealthConnectReaderWorker#60)
+    //
+    // - INTERNAL_SHARED_SECRET: auth-worker と共有。`/api/ghapi/store-tokens`
+    //   の Bearer 検証用。auth-worker の同名 secret と値を揃える。
+    // - GHAPI_WEBHOOK_AUTH_TOKEN: Google subscription 作成時の
+    //   endpointAuthorization。Google → `/api/ghapi/webhook` の Bearer 検証用。
+    // - GOOGLE_HEALTH_CLIENT_ID / SECRET: refresh_token → access_token の
+    //   交換に使う OAuth Client (login 用とは別 Client を発行)。auth-worker
+    //   と同じ値を共有する。
+    {
+      "binding": "INTERNAL_SHARED_SECRET",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "INTERNAL_SHARED_SECRET"
+    },
+    {
+      "binding": "GHAPI_WEBHOOK_AUTH_TOKEN",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "hcreader-ghapi-webhook-auth-token"
+    },
+    {
+      "binding": "GOOGLE_HEALTH_CLIENT_ID",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "GOOGLE_HEALTH_CLIENT_ID"
+    },
+    {
+      "binding": "GOOGLE_HEALTH_CLIENT_SECRET",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "GOOGLE_HEALTH_CLIENT_SECRET"
+    }
+  ],
+
+  // Google Health API 連携の per-user state (refresh_token / subscription_id /
+  // health_user_id) を 1 DO instance に閉じ込める。idFromName("default") 固定。
+  // Refs ippoan/HealthConnectReaderWorker#60
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GHAPI_SUBSCRIBER",
+        "class_name": "GhapiSubscriberDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GhapiSubscriberDO"]
     }
   ]
 }

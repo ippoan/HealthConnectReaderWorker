@@ -1984,6 +1984,105 @@ describe("POST /_admin/migrate", () => {
   });
 });
 
+describe("ghapi (Google Health API)", () => {
+  it("ghapiExercisePointToRow maps a representative Exercise data point", async () => {
+    const { ghapiExercisePointToRow } = await import("../src/db");
+    const point = {
+      id: "dp-1234",
+      startTimeMillis: Date.UTC(2026, 4, 27, 0, 0, 0),
+      endTimeMillis: Date.UTC(2026, 4, 27, 0, 30, 0),
+      dataType: "Exercise",
+      value: {
+        activityType: "Running",
+        distanceMeters: 5230.5,
+        activeKilocalories: 320,
+        steps: 5400,
+        averageHeartRate: 152,
+        minHeartRate: 110,
+        maxHeartRate: 178,
+      },
+    };
+    const row = await ghapiExercisePointToRow(
+      point,
+      "ghapi/Exercise/2026/05-27.json",
+      "2026-05-27T00:30:00Z",
+    );
+    expect(row).not.toBeNull();
+    expect(row?.source).toBe("ghapi");
+    expect(row?.date).toBe("2026-05-27");
+    expect(row?.activity_name).toBe("Running");
+    expect(row?.distance_m).toBe(5230.5);
+    expect(row?.duration_sec).toBe(30 * 60);
+    expect(row?.avg_heart_rate).toBe(152);
+    expect(row?.min_heart_rate).toBe(110);
+    expect(row?.max_heart_rate).toBe(178);
+    // id は安定 (同じ dataPoint id を投げると同じ row id)
+    const row2 = await ghapiExercisePointToRow(
+      point,
+      "ghapi/Exercise/2026/05-27.json",
+      "2026-05-28T00:00:00Z",
+    );
+    expect(row2?.id).toBe(row?.id);
+  });
+
+  it("ghapiExercisePointToRow returns null for invalid time fields", async () => {
+    const { ghapiExercisePointToRow } = await import("../src/db");
+    expect(
+      await ghapiExercisePointToRow({}, "k", "2026-01-01T00:00:00Z"),
+    ).toBeNull();
+    expect(
+      await ghapiExercisePointToRow(
+        { startTimeMillis: 100, endTimeMillis: 50 },
+        "k",
+        "2026-01-01T00:00:00Z",
+      ),
+    ).toBeNull();
+  });
+
+  it("upserts ghapi rows into workouts (source check accepts 'ghapi')", async () => {
+    const { ghapiExercisePointToRow, upsertWorkout } = await import("../src/db");
+    const row = await ghapiExercisePointToRow(
+      {
+        id: "dp-smoke-ghapi",
+        startTimeMillis: Date.UTC(2026, 4, 1, 1, 0, 0),
+        endTimeMillis: Date.UTC(2026, 4, 1, 1, 20, 0),
+        value: { activityType: "Walking", distanceMeters: 1200 },
+      },
+      "ghapi/Exercise/2026/05-01.json",
+      "2026-05-01T01:20:00Z",
+    );
+    expect(row).not.toBeNull();
+    if (!row) return;
+    await upsertWorkout(env.DB, row);
+    const got = await env.DB.prepare(
+      "SELECT source, activity_name FROM workouts WHERE id = ?",
+    )
+      .bind(row.id)
+      .first<{ source: string; activity_name: string }>();
+    expect(got?.source).toBe("ghapi");
+    expect(got?.activity_name).toBe("Walking");
+  });
+
+  it("POST /api/ghapi/store-tokens 401 without Bearer", async () => {
+    const r = await app.request(
+      "/api/ghapi/store-tokens",
+      { method: "POST", body: "{}" },
+      env,
+    );
+    // INTERNAL_SHARED_SECRET 未設定 → 500、設定後は 401。test では未設定なので 500。
+    expect([401, 500]).toContain(r.status);
+  });
+
+  it("POST /api/ghapi/webhook 401 without Bearer", async () => {
+    const r = await app.request(
+      "/api/ghapi/webhook",
+      { method: "POST", body: "{}" },
+      env,
+    );
+    expect([401, 500]).toContain(r.status);
+  });
+});
+
 describe("404", () => {
   it("returns json not_found for unknown route", async () => {
     const r = await app.request("/nope", {}, env);
