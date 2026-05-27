@@ -1683,8 +1683,7 @@ describe("GET /workout (HTML)", () => {
     );
     expect(r.status).toBe(200);
     const body = await r.text();
-    expect(body).toContain("speed-chart");
-    expect(body).toContain("zones-chart");
+    expect(body).toContain("combined-charts-container");
     expect(body).toContain("chart.js");
   });
 
