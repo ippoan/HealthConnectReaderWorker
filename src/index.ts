@@ -782,13 +782,18 @@ app.post("/api/pair/delete", apiAuth, async (c) => {
 // =============================================================================
 
 /**
- * auth-worker (`auth.ippoan.org`) の Google Health 専用 OAuth redirect URL を組む。
- * redirect_uri は post-OAuth で auth-worker → 302 で戻る先 (PWA UI)。
+ * auth-worker (`auth-staging.ippoan.org`) の Google Health 専用 OAuth redirect
+ * URL を組む。redirect_uri は post-OAuth で auth-worker → 302 で戻る先 (PWA UI)。
+ *
+ * 注: 既存ログイン用 (`buildAuthLoginUrl`) は `auth.ippoan.org` (prod) を使うが、
+ * Google Health 用 OAuth Client は Google Cloud Console で
+ * `https://auth-staging.ippoan.org/oauth/ghapi/callback` を redirect URI として
+ * 登録した経緯があり、staging 側に固定する。Refs #60
  */
 function buildGhapiConnectUrl(requestUrl: string): string {
   const u = new URL(requestUrl);
   const back = `${u.origin}/api/ghapi/connected`;
-  return `https://auth.ippoan.org/oauth/ghapi/redirect?redirect_uri=${encodeURIComponent(back)}`;
+  return `https://auth-staging.ippoan.org/oauth/ghapi/redirect?redirect_uri=${encodeURIComponent(back)}`;
 }
 
 function getGhapiStub(env: Env) {
