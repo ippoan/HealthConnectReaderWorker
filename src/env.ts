@@ -20,6 +20,21 @@ export interface Env {
   JWT_SECRET?: SecretsStoreBinding | string;
   R2: R2Bucket;
   DB: D1Database;
+  // auth-worker と共有する内部認証 token。auth-worker の Google Health OAuth
+  // callback が `/api/ghapi/store-tokens` に refresh_token を POST 転送するとき
+  // の Bearer。両 worker に同じ値を投入する。Refs #60
+  INTERNAL_SHARED_SECRET?: SecretsStoreBinding | string;
+  // Google から webhook (`POST /api/ghapi/webhook`) が来るとき、subscription
+  // 作成時に endpointAuthorization として登録した値が `Authorization: Bearer`
+  // で送られる。これと一致しなければ 401。Refs #60
+  GHAPI_WEBHOOK_AUTH_TOKEN?: SecretsStoreBinding | string;
+  // Google Health 用 OAuth Client。token refresh (refresh_token → access_token)
+  // で使う。auth-worker と同じ値を持たせる (= 同じ Client を共有)。Refs #60
+  GOOGLE_HEALTH_CLIENT_ID?: SecretsStoreBinding | string;
+  GOOGLE_HEALTH_CLIENT_SECRET?: SecretsStoreBinding | string;
+  // GhapiSubscriberDO の binding。idFromName("default") 固定 (= 1 user 運用)。
+  // Refs #60
+  GHAPI_SUBSCRIBER?: DurableObjectNamespace;
 }
 
 /**
@@ -39,5 +54,24 @@ export async function readJwtSecret(env: Env): Promise<string> {
   if (!s) return "";
   return typeof s === "string" ? s : await s.get();
 }
+
+async function readOptionalSecret(
+  v: SecretsStoreBinding | string | undefined,
+): Promise<string> {
+  if (!v) return "";
+  return typeof v === "string" ? v : await v.get();
+}
+
+export const readInternalSharedSecret = (env: Env): Promise<string> =>
+  readOptionalSecret(env.INTERNAL_SHARED_SECRET);
+
+export const readGhapiWebhookAuthToken = (env: Env): Promise<string> =>
+  readOptionalSecret(env.GHAPI_WEBHOOK_AUTH_TOKEN);
+
+export const readGoogleHealthClientId = (env: Env): Promise<string> =>
+  readOptionalSecret(env.GOOGLE_HEALTH_CLIENT_ID);
+
+export const readGoogleHealthClientSecret = (env: Env): Promise<string> =>
+  readOptionalSecret(env.GOOGLE_HEALTH_CLIENT_SECRET);
 
 export type AppEnv = { Bindings: Env };

@@ -152,6 +152,25 @@ export const INDEX_HTML = `<!doctype html>
     </div>
   </section>
 
+  <section class="bg-white rounded-2xl shadow p-4 space-y-3">
+    <h2 class="font-semibold">Google Health 連携</h2>
+    <p class="text-xs text-slate-500">
+      Google Health API を 3 つ目のデータソースとして接続。Refs #60
+    </p>
+    <p id="ghapi-status" class="text-sm text-slate-600 min-h-[1.25rem]">読込中…</p>
+    <div class="flex gap-2">
+      <button id="ghapi-connect-btn"
+        class="flex-1 bg-emerald-600 text-white text-sm font-semibold py-2 rounded-lg active:bg-emerald-700">
+        接続
+      </button>
+      <button id="ghapi-disconnect-btn"
+        class="flex-1 bg-rose-100 text-rose-700 text-sm font-semibold py-2 rounded-lg active:bg-rose-200 hidden">
+        切断
+      </button>
+    </div>
+    <ul id="ghapi-recent" class="text-xs text-slate-600 divide-y divide-slate-100"></ul>
+  </section>
+
   <section class="bg-white rounded-2xl shadow p-4">
     <h2 class="font-semibold mb-2">履歴</h2>
     <p id="history" class="text-sm text-slate-600">—</p>
@@ -602,6 +621,70 @@ function onWorkoutsListClick(ev) {
   }
 }
 
+// =============================================================================
+// Google Health (ghapi) 連携 UI
+// Refs ippoan/HealthConnectReaderWorker#60
+// =============================================================================
+
+async function refreshGhapiStatus() {
+  const statusEl = $("ghapi-status");
+  const connectBtn = $("ghapi-connect-btn");
+  const disconnectBtn = $("ghapi-disconnect-btn");
+  const recentList = $("ghapi-recent");
+  const r = await fetch("/api/ghapi/status", authFetchInit());
+  if (!r.ok) {
+    statusEl.textContent = "status 取得失敗 (" + r.status + ")";
+    return;
+  }
+  const j = await r.json();
+  if (!j.enabled) {
+    statusEl.textContent = "未設定 (DO binding なし)";
+    connectBtn.disabled = true;
+    return;
+  }
+  if (j.connected) {
+    const last = j.last_event_at
+      ? new Date(j.last_event_at).toLocaleString()
+      : "なし";
+    statusEl.textContent =
+      "✓ 接続済 (user " + (j.health_user_id || "—").slice(0, 12) +
+      "…) / 直近 event " + last + " / 取込済 " + (j.recent_count ?? 0) + " 件";
+    connectBtn.classList.add("hidden");
+    disconnectBtn.classList.remove("hidden");
+  } else {
+    statusEl.textContent = "未接続";
+    connectBtn.classList.remove("hidden");
+    disconnectBtn.classList.add("hidden");
+  }
+  const rows = Array.isArray(j.recent) ? j.recent : [];
+  if (rows.length === 0) {
+    recentList.innerHTML = "";
+  } else {
+    recentList.innerHTML = rows
+      .map((it) => {
+        const d = it.start_at ? new Date(it.start_at).toLocaleString() : it.date;
+        const km = it.distance_m !== null ? (it.distance_m / 1000).toFixed(2) + " km" : "—";
+        return '<li class="py-1 flex justify-between gap-2"><span>' +
+          escapeHtml(d) + " " + escapeHtml(it.activity_name || "—") +
+          '</span><span class="text-slate-500">' + km + "</span></li>";
+      })
+      .join("");
+  }
+}
+
+function ghapiConnect() {
+  // auth-worker の Google Health OAuth redirect は cookie 必須なため、
+  // 同一 origin の /ghapi/connect 経由で 302 chain に乗せる。
+  window.location.href = "/ghapi/connect";
+}
+
+async function ghapiDisconnect() {
+  if (!confirm("Google Health 連携を切断しますか？\\n(token revoke + subscription 削除)")) return;
+  const r = await fetch("/api/ghapi/disconnect", authFetchInit({ method: "POST" }));
+  if (!r.ok) { alert("切断失敗 " + r.status); return; }
+  refreshGhapiStatus().catch(() => {});
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   $("env-badge").textContent = hasNative ? "native bridge: ✓" : "PWA / preview";
   $("upload-btn").addEventListener("click", uploadNow);
@@ -616,9 +699,12 @@ document.addEventListener("DOMContentLoaded", () => {
   $("workouts-days").addEventListener("change", () => { refreshWorkouts().catch(() => {}); });
   $("workouts-days-list").addEventListener("click", onWorkoutsListClick);
   $("reindex-btn").addEventListener("click", reindexAll);
+  $("ghapi-connect-btn").addEventListener("click", ghapiConnect);
+  $("ghapi-disconnect-btn").addEventListener("click", ghapiDisconnect);
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});
   refreshWorkouts().catch(() => {});
+  refreshGhapiStatus().catch(() => {});
 });
 </script>
 </body>

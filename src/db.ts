@@ -15,7 +15,7 @@ export interface ZonesListItem {
  */
 export interface WorkoutRow {
   id: string;
-  source: "hc" | "zones";
+  source: "hc" | "zones" | "ghapi";
   date: string;                     // YYYY-MM-DD (UTC)
   start_at: string | null;          // ISO 8601 UTC
   end_at: string | null;            // ISO 8601 UTC
@@ -169,6 +169,94 @@ export async function upsertWorkout(db: D1Database, row: WorkoutRow): Promise<vo
       row.uploaded_at,
     )
     .run();
+}
+
+/**
+ * Google Health API (ghapi) の Exercise data point を D1 workouts row に
+ * 正規化する。サンプルレスポンス想定:
+ *
+ *   {
+ *     id: "<dataPoint id>",
+ *     startTimeMillis: 1716615600000,
+ *     endTimeMillis: 1716619200000,
+ *     dataType: "Exercise",
+ *     value: {
+ *       activityType: "Running",
+ *       distanceMeters: 5230.5,
+ *       activeKilocalories: 320,
+ *       steps: 5400,
+ *       averageHeartRate: 152,
+ *       minHeartRate: 110,
+ *       maxHeartRate: 178
+ *     }
+ *   }
+ *
+ * 未知 field は null。activity_name は `value.activityType` を流用。
+ * id 規約: `ghapi:<dataPoint id>` を SHA-256 上位 16 hex (再 fetch で安定)。
+ *
+ * Refs ippoan/HealthConnectReaderWorker#60
+ */
+export async function ghapiExercisePointToRow(
+  point: Record<string, unknown>,
+  rawKey: string,
+  uploadedAt: string,
+): Promise<WorkoutRow | null> {
+  const startMs = (point as { startTimeMillis?: unknown }).startTimeMillis;
+  const endMs = (point as { endTimeMillis?: unknown }).endTimeMillis;
+  if (typeof startMs !== "number" || typeof endMs !== "number") return null;
+  if (!(endMs > startMs)) return null;
+  const startAt = new Date(startMs).toISOString();
+  const endAt = new Date(endMs).toISOString();
+  const value =
+    (point as { value?: unknown }).value &&
+    typeof (point as { value?: unknown }).value === "object"
+      ? ((point as { value: Record<string, unknown> }).value)
+      : {};
+  const dataPointId =
+    typeof (point as { id?: unknown }).id === "string"
+      ? (point as { id: string }).id
+      : `${startMs}:${endMs}`;
+  const id = await ghapiPointId(dataPointId);
+  const activity = value.activityType;
+  return {
+    id,
+    source: "ghapi",
+    date: startAt.slice(0, 10),
+    start_at: startAt,
+    end_at: endAt,
+    activity_name: typeof activity === "string" ? activity : null,
+    distance_m:
+      typeof value.distanceMeters === "number" ? value.distanceMeters : null,
+    duration_sec: Math.round((endMs - startMs) / 1000),
+    active_calories:
+      typeof value.activeKilocalories === "number"
+        ? value.activeKilocalories
+        : null,
+    steps: typeof value.steps === "number" ? Math.round(value.steps) : null,
+    avg_heart_rate:
+      typeof value.averageHeartRate === "number"
+        ? Math.round(value.averageHeartRate)
+        : null,
+    min_heart_rate:
+      typeof value.minHeartRate === "number"
+        ? Math.round(value.minHeartRate)
+        : null,
+    max_heart_rate:
+      typeof value.maxHeartRate === "number"
+        ? Math.round(value.maxHeartRate)
+        : null,
+    raw_key: rawKey,
+    uploaded_at: uploadedAt,
+  };
+}
+
+async function ghapiPointId(dataPointId: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`ghapi:${dataPointId}`);
+  const buf = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `ghapi_${hex.slice(0, 16)}`;
 }
 
 /**
@@ -328,7 +416,7 @@ function hcExerciseName(exerciseType: unknown): string | null {
  */
 export async function listWorkouts(
   db: D1Database,
-  opts: { source?: "hc" | "zones"; limit?: number } = {},
+  opts: { source?: "hc" | "zones" | "ghapi"; limit?: number } = {},
 ): Promise<WorkoutRow[]> {
   const limit = opts.limit ?? 1000;
   const stmt = opts.source
@@ -630,7 +718,12 @@ export function groupAndMatch(
     const ra = find(a), rb = find(b);
     if (ra !== rb) parent.set(ra, rb);
   }
-  for (const r of rows) find(nodeId(r.source, r.id));
+  // ghapi など hc/zones 以外の source は突合グラフに乗せない (= ghapi 用に
+  // 別 UI セクションで表示する)。Refs ippoan/HealthConnectReaderWorker#60
+  for (const r of rows) {
+    if (r.source !== "hc" && r.source !== "zones") continue;
+    find(nodeId(r.source, r.id));
+  }
 
   // Manual edges 先 (cross-day も含む全て)
   for (const key of manualPairs) {
@@ -899,4 +992,37 @@ export async function listZonesFromDb(
     key: r.raw_key,
     uploaded: r.uploaded_at,
   }));
+}
+
+export interface GhapiListItem {
+  id: string;
+  date: string;
+  activity_name: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  distance_m: number | null;
+  duration_sec: number | null;
+  avg_heart_rate: number | null;
+  uploaded_at: string;
+}
+
+/**
+ * D1 から ghapi (Google Health API) workouts を新しい順に取得。
+ * `/api/ghapi/status` の `recent[]` 用。
+ * Refs ippoan/HealthConnectReaderWorker#60
+ */
+export async function listGhapiFromDb(
+  db: D1Database,
+  limit = 50,
+): Promise<GhapiListItem[]> {
+  const stmt = db.prepare(
+    `SELECT id, date, activity_name, start_at, end_at, distance_m,
+            duration_sec, avg_heart_rate, uploaded_at
+       FROM workouts
+      WHERE source = 'ghapi'
+      ORDER BY uploaded_at DESC
+      LIMIT ?`,
+  );
+  const result = await stmt.bind(limit).all<GhapiListItem>();
+  return result.results ?? [];
 }
