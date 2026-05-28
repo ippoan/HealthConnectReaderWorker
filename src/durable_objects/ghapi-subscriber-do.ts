@@ -224,20 +224,26 @@ export class GhapiSubscriberDO {
     }
 
     const DAY_MS = 86_400_000;
-    const now = Date.now();
+    // UTC midnight 境界に丸める (Health API の civil_start_time filter が
+    // 暦日単位で効くよう、interval を [UTC 00:00, 翌 UTC 00:00) に揃える)。
+    const todayMidnight = Math.floor(Date.now() / DAY_MS) * DAY_MS;
     let totalFetched = 0;
     let totalIndexed = 0;
     const errors: string[] = [];
 
     for (let i = 0; i < days; i++) {
-      const dayStart = now - (i + 1) * DAY_MS;
-      const dayEnd = now - i * DAY_MS;
+      const dayStart = todayMidnight - i * DAY_MS;
+      const dayEnd = dayStart + DAY_MS;
       const interval = { startTimeMillis: dayStart, endTimeMillis: dayEnd };
       let points: GhapiDataPoint[];
       try {
         points = await listExercisePoints(accessToken, [interval]);
       } catch (e) {
-        errors.push(String(e));
+        const msg = String(e);
+        if (errors.length === 0) {
+          console.error("ghapi_backfill_day_failed", { error: msg });
+        }
+        errors.push(msg);
         continue;
       }
       if (points.length === 0) continue;
@@ -263,6 +269,7 @@ export class GhapiSubscriberDO {
       fetched: totalFetched,
       indexed: totalIndexed,
       errors: errors.length,
+      first_error: errors[0] ? errors[0].slice(0, 300) : null,
     });
   }
 

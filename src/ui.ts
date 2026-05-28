@@ -726,7 +726,8 @@ async function ghapiBackfill() {
     }
     statusEl.textContent =
       "取込完了: " + (j.indexed ?? 0) + " 件 (取得 " + (j.fetched ?? 0) + " 点" +
-      (j.errors ? " / エラー " + j.errors + " 日" : "") + ")";
+      (j.errors ? " / エラー " + j.errors + " 日" : "") + ")" +
+      (j.first_error ? " — " + j.first_error : "");
     await refreshGhapiStatus().catch(() => {});
     await refreshWorkouts().catch(() => {});
   } catch (e) {
