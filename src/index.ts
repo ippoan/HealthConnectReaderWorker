@@ -47,8 +47,10 @@ import {
   uploadKeyForDateString,
   zonesKeyFor,
 } from "./r2";
+import { hrSeriesKey } from "./ghapi-ingest";
 import {
   FAVICON_ICO_BYTES,
+  GHAPI_DETAIL_HTML,
   INDEX_HTML,
   MANIFEST_JSON,
   SERVICE_WORKER_JS,
@@ -966,6 +968,78 @@ app.post("/api/ghapi/backfill", apiAuth, async (c) => {
     status: resp.status,
     headers: { "Content-Type": "application/json" },
   });
+});
+
+/**
+ * `GET /api/ghapi/workout?id=<id>` — ghapi workout 詳細 (HR 時系列 + 速度ステップ用)。
+ *
+ * 返り値:
+ *   - `row`: 対象 ghapi 行 (D1)
+ *   - `samples`: HR 時系列 `[{t,bpm}]` (R2 `ghapi/hr/<id>.json`、無ければ [])
+ *   - `overlapping`: HR 窓と時間 overlap する全 ghapi 行 (速度ステップ描画用。
+ *     「結合された長い session」配下の複数 treadmill 速度区間を重ねて見せる)
+ */
+app.get("/api/ghapi/workout", apiAuth, async (c) => {
+  const id = c.req.query("id");
+  if (!id) return c.json({ error: "missing_id" }, 400);
+
+  const row = await c.env.DB.prepare(
+    "SELECT * FROM workouts WHERE id = ? AND source = 'ghapi'",
+  )
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!row) return c.json({ error: "not_found" }, 404);
+
+  let samples: Array<{ t: number; bpm: number }> = [];
+  let padMs = 0;
+  const obj = await c.env.R2.get(hrSeriesKey(id));
+  if (obj) {
+    try {
+      const parsed = JSON.parse(await obj.text()) as {
+        samples?: Array<{ t: number; bpm: number }>;
+        pad_ms?: number;
+      };
+      if (Array.isArray(parsed.samples)) samples = parsed.samples;
+      if (typeof parsed.pad_ms === "number") padMs = parsed.pad_ms;
+    } catch {
+      /* corrupt → samples 空のまま */
+    }
+  }
+
+  // HR 窓 (= row 期間 ± pad) に overlap する ghapi 行を集める。
+  const startMs = typeof row.start_at === "string" ? Date.parse(row.start_at) : NaN;
+  const endMs = typeof row.end_at === "string" ? Date.parse(row.end_at) : NaN;
+  let overlapping: Record<string, unknown>[] = [];
+  if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+    const winStart = new Date(startMs - padMs).toISOString();
+    const winEnd = new Date(endMs + padMs).toISOString();
+    const res = await c.env.DB.prepare(
+      "SELECT * FROM workouts WHERE source = 'ghapi' AND start_at < ? AND end_at > ? ORDER BY start_at ASC",
+    )
+      .bind(winEnd, winStart)
+      .all<Record<string, unknown>>();
+    overlapping = res.results ?? [];
+  }
+
+  return c.json({ row, samples, overlapping });
+});
+
+/**
+ * `GET /ghapi/workout?id=<id>` — ghapi workout 詳細 HTML (Chart.js)。auth は `/` と同じ。
+ */
+app.get("/ghapi/workout", async (c) => {
+  const expected = await readUploadToken(c.env);
+  if (expected) {
+    const header = c.req.header("authorization") ?? "";
+    const m = /^Bearer\s+(.+)$/i.exec(header);
+    if (m && constantTimeEqualStr(m[1], expected)) {
+      return c.html(GHAPI_DETAIL_HTML);
+    }
+  }
+  if (await verifyAuthCookie(c.env, c.req.header("cookie") ?? "")) {
+    return c.html(GHAPI_DETAIL_HTML);
+  }
+  return c.redirect(buildAuthLoginUrl(c.req.url), 302);
 });
 
 /**

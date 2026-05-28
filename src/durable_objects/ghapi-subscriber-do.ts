@@ -30,12 +30,20 @@ import {
   createSubscription,
   deleteSubscription,
   listExercisePoints,
+  listHeartRateSamples,
+  summarizeHr,
   refreshAccessToken,
   revokeToken,
   type GhapiDataPoint,
   type GhapiWebhookPayload,
 } from "../ghapi";
-import { ingestExercisePoints, backfillDayStarts } from "../ghapi-ingest";
+import {
+  ingestExercisePoints,
+  backfillDayStarts,
+  hrSeriesKey,
+  HR_PAD_MS,
+} from "../ghapi-ingest";
+import { updateWorkoutHeartRate, type WorkoutRow } from "../db";
 
 interface DOEnv {
   R2: R2Bucket;
@@ -263,7 +271,7 @@ export class GhapiSubscriberDO {
         continue;
       }
       if (points.length === 0) continue;
-      const { indexed } = await ingestExercisePoints(
+      const { indexed, rows } = await ingestExercisePoints(
         this.env.R2,
         this.env.DB,
         "Exercise",
@@ -272,6 +280,20 @@ export class GhapiSubscriberDO {
       );
       totalFetched += points.length;
       totalIndexed += indexed;
+      // 各 session の HR 時系列を heart-rate dataType から取得して R2 保存 +
+      // D1 の min/max/avg を埋める (exercise summary が HR を持たない HC session
+      // でも Fitbit 等の HR を時間 overlap で拾える)。失敗は致命傷にしない。
+      for (const row of rows) {
+        try {
+          await this.enrichHeartRate(accessToken, row);
+        } catch (e) {
+          const msg = String(e);
+          if (errors.length === 0) {
+            console.error("ghapi_hr_enrich_failed", { id: row.id, error: msg });
+          }
+          errors.push(msg);
+        }
+      }
     }
 
     const now = Date.now();
@@ -294,6 +316,46 @@ export class GhapiSubscriberDO {
       indexed: totalIndexed,
       errors: errors.length,
       first_error: errors[0] ? errors[0].slice(0, 300) : null,
+    });
+  }
+
+  /**
+   * 1 session の HR 時系列を取得して R2 保存 + D1 の min/max/avg を埋める。
+   * HC session は時刻がずれることがあるので取得窓を ±HR_PAD_MS 広げる。
+   * exercise summary が avg HR を持つ (= row.avg_heart_rate 非 null) ならそれを
+   * 残し、無ければ series の avg を使う。min/max は summary に無いので常に series。
+   */
+  private async enrichHeartRate(
+    accessToken: string,
+    row: WorkoutRow,
+  ): Promise<void> {
+    const startMs = row.start_at ? Date.parse(row.start_at) : NaN;
+    const endMs = row.end_at ? Date.parse(row.end_at) : NaN;
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return;
+    const samples = await listHeartRateSamples(accessToken, {
+      startTimeMillis: startMs - HR_PAD_MS,
+      endTimeMillis: endMs + HR_PAD_MS,
+    });
+    if (samples.length === 0) return;
+
+    await this.env.R2.put(
+      hrSeriesKey(row.id),
+      JSON.stringify({
+        id: row.id,
+        start_at: row.start_at,
+        end_at: row.end_at,
+        pad_ms: HR_PAD_MS,
+        samples,
+      }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+
+    const sum = summarizeHr(samples);
+    if (!sum) return;
+    await updateWorkoutHeartRate(this.env.DB, row.id, {
+      avg: row.avg_heart_rate ?? sum.avg,
+      min: sum.min,
+      max: sum.max,
     });
   }
 

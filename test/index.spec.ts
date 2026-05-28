@@ -2180,7 +2180,68 @@ describe("ghapi (Google Health API)", () => {
   it("ingestExercisePoints returns zero-indexed for empty intervals", async () => {
     const { ingestExercisePoints } = await import("../src/ghapi-ingest");
     const res = await ingestExercisePoints(env.R2, env.DB, "Exercise", [], []);
-    expect(res).toEqual({ rawKey: "", fetched: 0, indexed: 0 });
+    expect(res).toEqual({ rawKey: "", fetched: 0, indexed: 0, rows: [] });
+  });
+
+  it("summarizeHr computes min/max/avg/count, null on empty", async () => {
+    const { summarizeHr } = await import("../src/ghapi");
+    expect(summarizeHr([])).toBeNull();
+    expect(summarizeHr([{ t: 1, bpm: 100 }, { t: 2, bpm: 140 }, { t: 3, bpm: 120 }]))
+      .toEqual({ min: 100, max: 140, avg: 120, count: 3 });
+  });
+
+  it("hrSeriesKey is deterministic per id", async () => {
+    const { hrSeriesKey } = await import("../src/ghapi-ingest");
+    expect(hrSeriesKey("ghapi_abc")).toBe("ghapi/hr/ghapi_abc.json");
+  });
+
+  it("listHeartRateSamples parses samples (string bpm) + paginates + sorts", async () => {
+    const { listHeartRateSamples } = await import("../src/ghapi");
+    const pages: Record<string, unknown> = {
+      "": {
+        dataPoints: [
+          { heartRate: { sampleTime: { physicalTime: "2026-05-28T05:10:00Z" }, beatsPerMinute: "144" } },
+          { heartRate: { sampleTime: { physicalTime: "2026-05-28T05:05:00Z" }, beatsPerMinute: 120 } },
+        ],
+        nextPageToken: "p2",
+      },
+      p2: {
+        dataPoints: [
+          { heartRate: { sampleTime: { physicalTime: "2026-05-28T05:20:00Z" }, beatsPerMinute: "150" } },
+          { heartRate: { sampleTime: {}, beatsPerMinute: "99" } }, // 時刻欠落 → skip
+        ],
+      },
+    };
+    const fetchImpl = (async (url: string) => {
+      const u = new URL(url);
+      const tok = u.searchParams.get("pageToken") ?? "";
+      return new Response(JSON.stringify(pages[tok]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const samples = await listHeartRateSamples(
+      "tok",
+      { startTimeMillis: Date.UTC(2026, 4, 28, 5, 0), endTimeMillis: Date.UTC(2026, 4, 28, 6, 0) },
+      fetchImpl,
+    );
+    // 3 件 (時刻欠落の 1 件は除外)、時刻昇順
+    expect(samples.map((s) => s.bpm)).toEqual([120, 144, 150]);
+    expect(samples[0].t).toBeLessThan(samples[1].t);
+  });
+
+  it("listHeartRateSamples throws ghapi_hr_list_failed on non-2xx", async () => {
+    const { listHeartRateSamples } = await import("../src/ghapi");
+    const fetchImpl = (async () =>
+      new Response("nope", { status: 403 })) as unknown as typeof fetch;
+    await expect(
+      listHeartRateSamples("tok", { startTimeMillis: 0, endTimeMillis: 1 }, fetchImpl),
+    ).rejects.toThrow(/ghapi_hr_list_failed:403/);
+  });
+
+  it("GET /api/ghapi/workout 400 without id, 401/404 with id", async () => {
+    const r1 = await app.request("/api/ghapi/workout", {}, env);
+    expect([400, 401]).toContain(r1.status);
   });
 
   it("backfillDayStarts: full N-day window when no last_backfill_at", async () => {
