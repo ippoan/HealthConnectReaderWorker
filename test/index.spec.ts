@@ -2640,8 +2640,22 @@ describe("GET /manual page", () => {
     expect(r.headers.get("content-type")).toMatch(/text\/html/);
     expect(await r.text()).toContain("HC データ手動作成");
   });
+  it("200 with ?ghapi= query (anchor preselect path)", async () => {
+    const r = await app.request("/manual?ghapi=ghapi_a5db782aaa40dfea", { headers: auth() }, env);
+    expect(r.status).toBe(200);
+  });
   it("302 without auth", async () => {
     const r = await app.request("/manual", {}, env);
     expect(r.status).toBe(302);
+  });
+});
+
+describe("GET /ghapi/workout page has 手動作成 link", () => {
+  it("contains link to /manual?ghapi=", async () => {
+    const r = await app.request("/ghapi/workout?id=ghapi_x", { headers: auth() }, env);
+    expect(r.status).toBe(200);
+    const html = await r.text();
+    expect(html).toContain("手動作成");
+    expect(html).toContain("/manual?ghapi=");
   });
 });
