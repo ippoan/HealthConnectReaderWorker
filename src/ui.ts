@@ -1900,9 +1900,8 @@ function renderCompare(jA, jB) {
     });
     bIdx.push(datasets.length - 1);
   }
-  // 速度は各 workout の突合 HC session を「下部の塗り速度帯」として重ねる。
-  // 実線 + 0 まで塗り (fill) で、心拍の下に帯として出す。
-  let maxSpeedVal = 0;
+  // 速度は各 workout の突合 HC session を「塗り速度帯」として重ねる。
+  // 実線 + 0 まで塗り (fill)。
   const pushSpeed = function (j, start, color, bg, tag) {
     const sess = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
     sess.forEach(function (w) {
@@ -1911,7 +1910,6 @@ function renderCompare(jA, jB) {
       const e = w.end_at ? Date.parse(w.end_at) : null;
       if (s == null || e == null || start == null) return;
       const v = (Number(w.distance_m) / 1000) / (Number(w.duration_sec) / 3600);
-      if (v > maxSpeedVal) maxSpeedVal = v;
       datasets.push({
         label: tag + ": " + v.toFixed(1) + "km/h",
         data: [{ x: elapsedMin(s, start), y: v }, { x: elapsedMin(e, start), y: v }],
@@ -1953,17 +1951,7 @@ function renderCompare(jA, jB) {
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
         hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
-        // 速度帯はチャート下部 (約 1/3) に収めるため軸上限を実測 max の ~3 倍にする。
-        // この上限は帯の位置決め用で実 km/h とはズレるので目盛り/グリッド/タイトル
-        // は隠す。実値は凡例 (例 "A: 10.0km/h") とツールチップで読める。
-        speed: {
-          type: "linear", position: "left",
-          beginAtZero: true,
-          max: maxSpeedVal > 0 ? Math.ceil((maxSpeedVal / 0.32) / 5) * 5 : undefined,
-          ticks: { display: false },
-          grid: { display: false },
-          title: { display: false },
-        },
+        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
       },
       plugins: {
         legend: {
