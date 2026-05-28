@@ -1604,7 +1604,7 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
   <header class="flex items-center justify-between pt-2">
     <a href="/" class="text-sm text-emerald-700">‹ 戻る</a>
     <h1 id="page-title" class="text-lg font-semibold">Google Health 詳細</h1>
-    <span></span>
+    <a id="to-manual" href="/manual" class="text-sm text-amber-700 font-medium">✏️ 手動作成</a>
   </header>
   <section id="compare-bar" class="bg-white rounded-2xl shadow p-3 text-sm flex flex-wrap items-center gap-2">
     <label class="text-[12px] text-slate-500">比較相手</label>
@@ -2098,6 +2098,9 @@ function setupOffset(chart, bIdx, sliderMin, sliderMax, onApply) {
 async function load() {
   const summaryEl = document.getElementById("summary");
   if (!id) { summaryEl.textContent = "id がありません"; return; }
+  // この心拍 (ghapi) を基準に手動作成ページを開くリンク。
+  var toManual = document.getElementById("to-manual");
+  if (toManual) toManual.href = "/manual?ghapi=" + encodeURIComponent(id);
   populateCompare();
   if (id2) {
     let jA, jB;
@@ -2271,6 +2274,8 @@ var chart = null;
 var hrDatasetIdx = -1;   // 心拍系列の dataset index (無ければ -1)
 var winDatasetIdx = -1;  // ワークアウト窓 (速度帯) の dataset index
 var anchors = {};        // value -> { id, source, start_at, hasHr, label }
+// /ghapi/workout?id=... から「✏️ 手動作成」で渡される基準 ghapi id (任意)。
+var initGhapi = new URLSearchParams(location.search).get("ghapi") || "";
 
 // 距離 ÷ 速度 → 継続時間(分) を duration-input に自動セット。
 function recomputeDuration() {
@@ -2443,6 +2448,38 @@ async function loadAnchors() {
 }
 function fmtDate2(ms) { var d = new Date(ms); return pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
 
+// URL の ?ghapi=<id> があれば、その ghapi workout を基準として自動選択する。
+// 90 日候補に居なければ /api/ghapi/workout から row を引いて候補に足してから選ぶ。
+async function applyInitialAnchor() {
+  if (!initGhapi) return;
+  var sel = $("anchor-select");
+  var key = "ghapi:" + initGhapi;
+  if (!anchors[key]) {
+    try {
+      var r = await authFetch("/api/ghapi/workout?id=" + encodeURIComponent(initGhapi));
+      var j = await r.json();
+      var row = j.row || {};
+      if (!row.start_at) { $("anchor-status").textContent = "指定の心拍 workout が見つかりません"; return; }
+      var ms = Date.parse(row.start_at);
+      anchors[key] = {
+        id: initGhapi, source: "ghapi", start_at: row.start_at, hasHr: true,
+        label: fmtDate2(ms) + " " + fmtClock(ms) + " " + (row.activity_name || "ghapi"),
+      };
+      var opt = document.createElement("option");
+      opt.value = key; opt.textContent = "♥ " + anchors[key].label;
+      sel.insertBefore(opt, sel.firstChild ? sel.firstChild.nextSibling : null);
+      // 距離・速度の初期値も埋めておく (そのまま作成しやすく)
+      if (row.distance_m != null) $("distance-input").value = (row.distance_m / 1000).toFixed(2);
+      if (row.distance_m != null && row.duration_sec) {
+        $("speed-input").value = ((row.distance_m / 1000) / (row.duration_sec / 3600)).toFixed(1);
+        recomputeDuration();
+      }
+    } catch (e) { $("anchor-status").textContent = "心拍 workout 取得失敗: " + e; return; }
+  }
+  sel.value = key;
+  onAnchorChange();
+}
+
 async function createManual() {
   var startMs = currentStartMs();
   var durSec = currentDurationSec();
@@ -2526,7 +2563,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var b = ev.target.closest && ev.target.closest("button[data-del]");
     if (b) deleteManual(b.getAttribute("data-del"));
   });
-  loadAnchors();
+  loadAnchors().then(function () { applyInitialAnchor(); });
   refreshManualList();
   updateWindow();
 });
