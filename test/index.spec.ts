@@ -2195,6 +2195,34 @@ describe("ghapi (Google Health API)", () => {
     expect(hrSeriesKey("ghapi_abc")).toBe("ghapi/hr/ghapi_abc.json");
   });
 
+  it("extractHcSpeedSamples returns in-window samples sorted by time", async () => {
+    const { extractHcSpeedSamples } = await import("../src/r2");
+    const payload = {
+      speeds: [
+        {
+          samples: [
+            { time: "2026-05-27T20:10:00Z", kmh: 11.0 },
+            { time: "2026-05-27T20:05:00Z", kmh: 9.0 },
+            { time: "2026-05-27T19:00:00Z", kmh: 5.0 }, // 窓外 (前)
+            { time: "bad", kmh: 8 }, // 不正 time
+            { time: "2026-05-27T20:08:00Z", kmh: "10" }, // kmh 文字列 → 除外
+          ],
+        },
+      ],
+    };
+    const winStart = Date.parse("2026-05-27T20:00:00Z");
+    const winEnd = Date.parse("2026-05-27T20:30:00Z");
+    const out = extractHcSpeedSamples(payload, winStart, winEnd);
+    expect(out.map((s) => s.kmh)).toEqual([9.0, 11.0]);
+    expect(out[0].t).toBeLessThan(out[1].t);
+  });
+
+  it("jstDateStr maps UTC ms to JST date", async () => {
+    const { jstDateStr } = await import("../src/r2");
+    // 2026-05-27T20:00Z = JST 2026-05-28 05:00
+    expect(jstDateStr(Date.parse("2026-05-27T20:00:00Z"))).toBe("2026-05-28");
+  });
+
   it("listHeartRateSamples parses samples (string bpm) + paginates + sorts", async () => {
     const { listHeartRateSamples } = await import("../src/ghapi");
     const pages: Record<string, unknown> = {
