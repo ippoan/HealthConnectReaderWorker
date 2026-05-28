@@ -1556,9 +1556,9 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
     <h2 class="font-semibold">心拍 + 速度</h2>
     <p class="text-[10px] text-slate-400">
-      折れ線 = 心拍 (右軸 bpm)。色帯 = 各 workout の平均速度 (左軸 km/h) を期間で
-      ステップ表示。速度区間の境界で心拍が上下するかを確認できる。
-      心拍は時刻ズレ対策で前後 5 分広げて取得。
+      赤 = 心拍 (Fitbit, 右軸 bpm)。青 = 速度 (HC 実測の細かいサンプル, 左軸 km/h)。
+      速度の上下と心拍の上下が同期するか確認できる。速度は HC、心拍は Fitbit から
+      取得し時間軸で重ねる。心拍は時刻ズレ対策で前後 5 分広げて取得。
     </p>
     <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
     <canvas id="hr-chart" height="220"></canvas>
@@ -1594,12 +1594,6 @@ function fmtDur(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
   return (h > 0 ? h + "h " : "") + m + "m";
 }
-function speedKmh(row) {
-  if (row.distance_m == null || !row.duration_sec) return null;
-  return (row.distance_m / 1000) / (row.duration_sec / 3600);
-}
-const SPEED_COLORS = ["#0284c7", "#7c3aed", "#db2777", "#ea580c", "#16a34a", "#0891b2"];
-
 async function load() {
   const summaryEl = document.getElementById("summary");
   if (!id) { summaryEl.textContent = "id がありません"; return; }
@@ -1614,7 +1608,6 @@ async function load() {
 
   const row = j.row || {};
   const samples = Array.isArray(j.samples) ? j.samples : [];
-  const overlapping = Array.isArray(j.overlapping) ? j.overlapping : [];
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
 
   const startMs = row.start_at ? Date.parse(row.start_at) : null;
@@ -1650,23 +1643,22 @@ async function load() {
     tension: 0.25,
     fill: true,
   }];
-  overlapping.forEach(function (w, i) {
-    const v = speedKmh(w);
-    if (v == null) return;
-    const s = w.start_at ? Date.parse(w.start_at) : null;
-    const e = w.end_at ? Date.parse(w.end_at) : null;
-    if (s == null || e == null) return;
+  // 速度は HC 実測の細かいサンプル (hc_speed) を折れ線で重ねる。Google Health の
+  // 平均速度は使わない (区間平均だと 11km/h が均されて見えないため)。
+  const hcSpeed = Array.isArray(j.hc_speed) ? j.hc_speed : [];
+  if (hcSpeed.length > 0) {
     datasets.push({
-      label: (w.activity_name || "speed") + " " + v.toFixed(1) + "km/h",
-      data: [{ x: s, y: v }, { x: e, y: v }],
+      label: "速度 (HC, km/h)",
+      data: hcSpeed.map(function (s) { return { x: s.t, y: s.kmh }; }),
       yAxisID: "speed",
-      borderColor: SPEED_COLORS[i % SPEED_COLORS.length],
-      borderWidth: 3,
+      borderColor: "#0284c7",
+      backgroundColor: "rgba(2,132,199,0.06)",
+      borderWidth: 1.5,
       pointRadius: 0,
       stepped: true,
       fill: false,
     });
-  });
+  }
 
   new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",

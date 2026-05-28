@@ -42,6 +42,8 @@ import {
 } from "./env";
 import { applySchema } from "./migrations";
 import {
+  extractHcSpeedSamples,
+  jstDateStr,
   summarizeHistory,
   uploadKeyFor,
   uploadKeyForDateString,
@@ -1006,22 +1008,42 @@ app.get("/api/ghapi/workout", apiAuth, async (c) => {
     }
   }
 
-  // HR 窓 (= row 期間 ± pad) に overlap する ghapi 行を集める。
+  // HR 窓 (= row 期間 ± pad)
   const startMs = typeof row.start_at === "string" ? Date.parse(row.start_at) : NaN;
   const endMs = typeof row.end_at === "string" ? Date.parse(row.end_at) : NaN;
   let overlapping: Record<string, unknown>[] = [];
+  let hcSpeed: Array<{ t: number; kmh: number }> = [];
   if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
-    const winStart = new Date(startMs - padMs).toISOString();
-    const winEnd = new Date(endMs + padMs).toISOString();
+    const winStartMs = startMs - padMs;
+    const winEndMs = endMs + padMs;
+    const winStart = new Date(winStartMs).toISOString();
+    const winEnd = new Date(winEndMs).toISOString();
     const res = await c.env.DB.prepare(
       "SELECT * FROM workouts WHERE source = 'ghapi' AND start_at < ? AND end_at > ? ORDER BY start_at ASC",
     )
       .bind(winEnd, winStart)
       .all<Record<string, unknown>>();
     overlapping = res.results ?? [];
+
+    // 速度は HC 実測 (細かいサンプル) から取る (Google Health の平均は使わない)。
+    // HC R2 file は JST 日付 key なので窓を JST 日付に変換して該当 file を読む。
+    const dates = new Set<string>([jstDateStr(winStartMs), jstDateStr(winEndMs)]);
+    for (const d of dates) {
+      const k = uploadKeyForDateString(d);
+      if (!k) continue;
+      const obj = await c.env.R2.get(k.key);
+      if (!obj) continue;
+      try {
+        const payload = JSON.parse(await obj.text());
+        hcSpeed = hcSpeed.concat(extractHcSpeedSamples(payload, winStartMs, winEndMs));
+      } catch {
+        /* corrupt HC payload → skip */
+      }
+    }
+    hcSpeed.sort((a, b) => a.t - b.t);
   }
 
-  return c.json({ row, samples, overlapping });
+  return c.json({ row, samples, overlapping, hc_speed: hcSpeed });
 });
 
 /**

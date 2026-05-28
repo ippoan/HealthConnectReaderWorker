@@ -30,6 +30,48 @@ export function uploadKeyForDateString(date: string): UploadKey | null {
   return { yyyy, mmdd: `${mm}-${dd}`, key: `hc/${yyyy}/${mm}-${dd}.json` };
 }
 
+export interface HcSpeedSample {
+  /** epoch ms */
+  t: number;
+  kmh: number;
+}
+
+/** epoch ms → JST (UTC+9) の `YYYY-MM-DD` (HC R2 file は JST 日付 key)。 */
+export function jstDateStr(ms: number): string {
+  return new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * HC payload (`{ speeds: [{ samples: [{ time, kmh }] }] }`) から時間窓
+ * `[winStartMs, winEndMs]` に入る速度サンプルを抽出する。time は ISO 文字列。
+ * 速度=HC 実測 (細かいサンプル) を ghapi 詳細チャートに重ねるため。Refs #60
+ */
+export function extractHcSpeedSamples(
+  payload: unknown,
+  winStartMs: number,
+  winEndMs: number,
+): HcSpeedSample[] {
+  const out: HcSpeedSample[] = [];
+  if (!payload || typeof payload !== "object") return out;
+  const speeds = (payload as { speeds?: unknown }).speeds;
+  if (!Array.isArray(speeds)) return out;
+  for (const sp of speeds) {
+    const samples = (sp as { samples?: unknown }).samples;
+    if (!Array.isArray(samples)) continue;
+    for (const s of samples) {
+      const time = (s as { time?: unknown }).time;
+      const kmh = (s as { kmh?: unknown }).kmh;
+      if (typeof time !== "string" || typeof kmh !== "number") continue;
+      const t = Date.parse(time);
+      if (!Number.isFinite(t)) continue;
+      if (t < winStartMs || t > winEndMs) continue;
+      out.push({ t, kmh });
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
 const ZONES_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
 /**
