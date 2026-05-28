@@ -14,7 +14,7 @@
  */
 
 import type { GhapiDataPoint } from "./ghapi";
-import { ghapiExercisePointToRow, upsertWorkout } from "./db";
+import { ghapiExercisePointToRow, upsertWorkout, type WorkoutRow } from "./db";
 
 export interface GhapiInterval {
   startTimeMillis: number;
@@ -25,9 +25,20 @@ export interface IngestResult {
   rawKey: string;
   fetched: number;
   indexed: number;
+  /** upsert した行 (HR enrichment 等の後処理で id / 期間を使う)。 */
+  rows: WorkoutRow[];
 }
 
 const DAY_MS = 86_400_000;
+
+/** HC 経由の exercise session は時刻がずれることがあるため、HR 取得窓を前後に
+ *  広げて Fitbit 等別デバイスの HR を取りこぼさないようにするマージン。 */
+export const HR_PAD_MS = 5 * 60_000;
+
+/** 心拍時系列 R2 key。backfill が書き、`/api/ghapi/workout?id=` が読む。 */
+export function hrSeriesKey(id: string): string {
+  return `ghapi/hr/${id}.json`;
+}
 
 /**
  * backfill で走査する UTC 暦日 (各日の 00:00 UTC の epoch ms) を新しい順に列挙する。
@@ -79,7 +90,7 @@ export async function ingestExercisePoints(
   points: GhapiDataPoint[],
 ): Promise<IngestResult> {
   if (intervals.length === 0) {
-    return { rawKey: "", fetched: points.length, indexed: 0 };
+    return { rawKey: "", fetched: points.length, indexed: 0, rows: [] };
   }
 
   const firstStart = new Date(intervals[0]!.startTimeMillis);
@@ -103,6 +114,7 @@ export async function ingestExercisePoints(
   }
 
   let indexed = 0;
+  const rows: WorkoutRow[] = [];
   if (dataType === "Exercise" && points.length > 0) {
     const uploadedAt = new Date().toISOString();
     for (const p of points) {
@@ -115,11 +127,12 @@ export async function ingestExercisePoints(
       try {
         await upsertWorkout(db, row);
         indexed++;
+        rows.push(row);
       } catch (e) {
         console.warn("ghapi_upsert_failed", { error: String(e), id: row.id });
       }
     }
   }
 
-  return { rawKey, fetched: points.length, indexed };
+  return { rawKey, fetched: points.length, indexed, rows };
 }

@@ -464,13 +464,17 @@ function renderItem(it) {
   if (it.type === "ghapi_only") {
     const gh = it.ghapi;
     return [
-      '<div class="border-l-2 border-fuchsia-300 pl-2 py-1">',
+      '<div class="border-l-2 border-fuchsia-300 pl-2 py-1 flex items-start justify-between">',
+      '<div>',
       '<div class="text-xs font-medium">', badge("ghapi_only"),
       ' ', fmtTime(gh.start_at), '–', fmtTime(gh.end_at),
       ' ', escapeHtml(gh.activity_name || "—"), '</div>',
       '<div class="text-[11px] text-slate-600">Google Health: ', fmtKm(gh.distance_m),
       ' / ', fmtDur(gh.duration_sec),
       ' / ♥', (gh.avg_heart_rate ?? "—"), '</div>',
+      '</div>',
+      '<a class="text-[10px] text-fuchsia-700 hover:underline shrink-0" href="/ghapi/workout?id=',
+      encodeURIComponent(gh.id), '">心拍 ›</a>',
       '</div>',
     ].join("");
   }
@@ -1515,6 +1519,165 @@ function applyPicker() {
   location.search = "?" + qs.toString();
 }
 
+load();
+</script>
+</body>
+</html>`;
+
+/**
+ * `GET /ghapi/workout?id=<id>` で配信する Google Health workout 詳細ページ。
+ * `/api/ghapi/workout?id=` から HR 時系列 + overlap する ghapi 行を取得し、
+ * Chart.js で「HR 折れ線 (右軸 bpm) + 各 session の速度ステップ (左軸 km/h)」を
+ * 同一時間軸に重ねて描画する。速度区間の境界で HR が上下する様子を見るのが目的。
+ * Refs ippoan/HealthConnectReaderWorker#60
+ */
+export const GHAPI_DETAIL_HTML = `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Google Health 詳細 — HC Reader</title>
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<meta name="theme-color" content="#059669" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+<div class="max-w-3xl mx-auto p-4 space-y-4">
+  <header class="flex items-center justify-between pt-2">
+    <a href="/" class="text-sm text-emerald-700">‹ 戻る</a>
+    <h1 class="text-lg font-semibold">Google Health 詳細</h1>
+    <span></span>
+  </header>
+  <section id="summary" class="bg-white rounded-2xl shadow p-4 text-sm text-slate-700">読込中…</section>
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold">心拍 + 速度</h2>
+    <p class="text-[10px] text-slate-400">
+      折れ線 = 心拍 (右軸 bpm)。色帯 = 各 workout の平均速度 (左軸 km/h) を期間で
+      ステップ表示。速度区間の境界で心拍が上下するかを確認できる。
+      心拍は時刻ズレ対策で前後 5 分広げて取得。
+    </p>
+    <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
+    <canvas id="hr-chart" height="220"></canvas>
+  </section>
+  <details class="bg-white rounded-2xl shadow p-4">
+    <summary class="cursor-pointer text-sm font-semibold">raw (debug)</summary>
+    <pre id="raw-dump" class="mt-2 text-[10px] text-slate-600 overflow-x-auto whitespace-pre-wrap"></pre>
+  </details>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+const id = params.get("id") || "";
+function authHeaders() {
+  try {
+    if (window.HC && typeof window.HC.getUploadToken === "function") {
+      const t = window.HC.getUploadToken();
+      if (t) return { Authorization: "Bearer " + t };
+    }
+  } catch (e) {}
+  return {};
+}
+function fmtClock(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function fmtDur(sec) {
+  if (sec == null) return "—";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return (h > 0 ? h + "h " : "") + m + "m";
+}
+function speedKmh(row) {
+  if (row.distance_m == null || !row.duration_sec) return null;
+  return (row.distance_m / 1000) / (row.duration_sec / 3600);
+}
+const SPEED_COLORS = ["#0284c7", "#7c3aed", "#db2777", "#ea580c", "#16a34a", "#0891b2"];
+
+async function load() {
+  const summaryEl = document.getElementById("summary");
+  if (!id) { summaryEl.textContent = "id がありません"; return; }
+  let j;
+  try {
+    const r = await fetch("/api/ghapi/workout?id=" + encodeURIComponent(id), {
+      credentials: "include", headers: authHeaders(),
+    });
+    if (!r.ok) { summaryEl.textContent = "取得失敗 (" + r.status + ")"; return; }
+    j = await r.json();
+  } catch (e) { summaryEl.textContent = "取得エラー: " + e; return; }
+
+  const row = j.row || {};
+  const samples = Array.isArray(j.samples) ? j.samples : [];
+  const overlapping = Array.isArray(j.overlapping) ? j.overlapping : [];
+  document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
+
+  const startMs = row.start_at ? Date.parse(row.start_at) : null;
+  const endMs = row.end_at ? Date.parse(row.end_at) : null;
+  summaryEl.innerHTML =
+    '<div class="font-medium">' + (row.activity_name || "—") + "</div>" +
+    '<div class="text-[12px] text-slate-500">' +
+    (startMs ? fmtClock(startMs) + "–" + fmtClock(endMs) : "") +
+    " · " + ((row.distance_m != null) ? (row.distance_m / 1000).toFixed(2) + " km" : "—") +
+    " · " + fmtDur(row.duration_sec) + "</div>" +
+    '<div class="text-[12px] mt-1">♥ avg ' + (row.avg_heart_rate ?? "—") +
+    " / min " + (row.min_heart_rate ?? "—") +
+    " / max " + (row.max_heart_rate ?? "—") +
+    " (" + samples.length + " samples)</div>";
+
+  if (samples.length === 0) {
+    document.getElementById("chart-empty").classList.remove("hidden");
+    return;
+  }
+
+  const hrData = samples.map(function (s) { return { x: s.t, y: s.bpm }; });
+  const datasets = [{
+    label: "心拍 (bpm)",
+    data: hrData,
+    yAxisID: "hr",
+    borderColor: "#e11d48",
+    backgroundColor: "rgba(225,29,72,0.08)",
+    borderWidth: 1.5,
+    pointRadius: 0,
+    tension: 0.25,
+    fill: true,
+  }];
+  overlapping.forEach(function (w, i) {
+    const v = speedKmh(w);
+    if (v == null) return;
+    const s = w.start_at ? Date.parse(w.start_at) : null;
+    const e = w.end_at ? Date.parse(w.end_at) : null;
+    if (s == null || e == null) return;
+    datasets.push({
+      label: (w.activity_name || "speed") + " " + v.toFixed(1) + "km/h",
+      data: [{ x: s, y: v }, { x: e, y: v }],
+      yAxisID: "speed",
+      borderColor: SPEED_COLORS[i % SPEED_COLORS.length],
+      borderWidth: 3,
+      pointRadius: 0,
+      stepped: true,
+      fill: false,
+    });
+  });
+
+  new Chart(document.getElementById("hr-chart").getContext("2d"), {
+    type: "line",
+    data: { datasets: datasets },
+    options: {
+      responsive: true,
+      interaction: { intersect: false, mode: "index" },
+      scales: {
+        x: {
+          type: "linear",
+          ticks: { callback: function (v) { return fmtClock(v); }, maxTicksLimit: 8 },
+        },
+        hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
+        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
+      },
+      plugins: { legend: { labels: { boxWidth: 12, font: { size: 10 } } } },
+    },
+  });
+}
 load();
 </script>
 </body>

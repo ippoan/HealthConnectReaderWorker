@@ -172,6 +172,34 @@ export async function upsertWorkout(db: D1Database, row: WorkoutRow): Promise<vo
 }
 
 /**
+ * workout 行の心拍カラム (avg/min/max) だけを更新する。ghapi の HR は exercise
+ * summary ではなく別 dataType (`heart-rate`) から後追いで埋めるため、upsert 後に
+ * これで上書きする。既存の avg は summary 由来があれば残したい場合があるので、
+ * `avg` に null を渡すと avg は更新しない (min/max のみ更新)。
+ */
+export async function updateWorkoutHeartRate(
+  db: D1Database,
+  id: string,
+  hr: { avg: number | null; min: number | null; max: number | null },
+): Promise<void> {
+  if (hr.avg !== null) {
+    await db
+      .prepare(
+        "UPDATE workouts SET avg_heart_rate = ?, min_heart_rate = ?, max_heart_rate = ? WHERE id = ?",
+      )
+      .bind(hr.avg, hr.min, hr.max, id)
+      .run();
+  } else {
+    await db
+      .prepare(
+        "UPDATE workouts SET min_heart_rate = ?, max_heart_rate = ? WHERE id = ?",
+      )
+      .bind(hr.min, hr.max, id)
+      .run();
+  }
+}
+
+/**
  * Google Health API v4 の `exercise` dataPoint を D1 workouts row に正規化する。
  * レスポンス shape (`GET /v4/users/me/dataTypes/exercise/dataPoints`):
  *

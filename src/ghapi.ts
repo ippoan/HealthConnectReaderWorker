@@ -165,6 +165,98 @@ export async function listExercisePoints(
   return out;
 }
 
+export interface HrSample {
+  /** epoch ms (sampleTime.physicalTime) */
+  t: number;
+  bpm: number;
+}
+
+/**
+ * 指定 interval の心拍サンプルを取得 (`heart-rate` dataType)。
+ *
+ * Google Health API v4:
+ *   `GET /v4/users/me/dataTypes/heart-rate/dataPoints?filter=<AIP-160>`
+ * sample 型なので physical_time で範囲指定:
+ *   `heart_rate.sample_time.physical_time >= "<RFC3339>" AND
+ *    heart_rate.sample_time.physical_time < "<RFC3339>"`
+ * レスポンス要素: `{ heartRate: { sampleTime: { physicalTime }, beatsPerMinute } }`。
+ *
+ * exercise session が HC (treadmill) 由来で HR を持たなくても、同じ時間帯に
+ * 別デバイス (Fitbit 等) が記録した HR がこの dataType から時間 overlap で拾える。
+ * bpm は int64 として文字列で返りうるので number / 数値文字列両対応。
+ * scope は exercise と同じ `googlehealth.activity_and_fitness(.readonly)`。
+ */
+export async function listHeartRateSamples(
+  accessToken: string,
+  interval: { startTimeMillis: number; endTimeMillis: number },
+  fetchImpl: typeof fetch = fetch,
+): Promise<HrSample[]> {
+  const startIso = new Date(interval.startTimeMillis).toISOString();
+  const endIso = new Date(interval.endTimeMillis).toISOString();
+  const filter =
+    `heart_rate.sample_time.physical_time >= "${startIso}" AND ` +
+    `heart_rate.sample_time.physical_time < "${endIso}"`;
+  const out: HrSample[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({ pageSize: "10000", filter });
+    if (pageToken) params.set("pageToken", pageToken);
+    const url = `${GHAPI_DATA_BASE}/users/me/dataTypes/heart-rate/dataPoints?${params.toString()}`;
+    const resp = await fetchImpl(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`ghapi_hr_list_failed:${resp.status}:${text.slice(0, 200)}`);
+    }
+    const j = (await resp.json()) as {
+      dataPoints?: Array<{
+        heartRate?: {
+          sampleTime?: { physicalTime?: string };
+          beatsPerMinute?: number | string;
+        };
+      }>;
+      nextPageToken?: string;
+    };
+    for (const dp of j.dataPoints ?? []) {
+      const ts = dp.heartRate?.sampleTime?.physicalTime;
+      const rawBpm = dp.heartRate?.beatsPerMinute;
+      const t = ts ? Date.parse(ts) : NaN;
+      const bpm =
+        typeof rawBpm === "number"
+          ? rawBpm
+          : typeof rawBpm === "string" && rawBpm.trim() !== ""
+            ? Number(rawBpm)
+            : NaN;
+      if (Number.isFinite(t) && Number.isFinite(bpm)) out.push({ t, bpm });
+    }
+    pageToken = j.nextPageToken;
+  } while (pageToken);
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+/** HR サンプル列から min / max / avg (整数) を計算。空なら null。 */
+export function summarizeHr(
+  samples: HrSample[],
+): { min: number; max: number; avg: number; count: number } | null {
+  if (samples.length === 0) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  for (const s of samples) {
+    if (s.bpm < min) min = s.bpm;
+    if (s.bpm > max) max = s.bpm;
+    sum += s.bpm;
+  }
+  return {
+    min: Math.round(min),
+    max: Math.round(max),
+    avg: Math.round(sum / samples.length),
+    count: samples.length,
+  };
+}
+
 /**
  * Webhook subscription 作成 stub。
  *
