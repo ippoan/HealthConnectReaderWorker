@@ -50,6 +50,30 @@ export function zonesKeyFor(startDate: string, uuid: string): UploadKey | null {
   return { yyyy, mmdd: `${mm}-${dd}`, key: `zones/${yyyy}/${mm}-${dd}/${uuid}.json` };
 }
 
+/**
+ * 手動作成 HC データ 1 件を `manual/{yyyy}/{mm}-{dd}/{id}.json` 配下に置く key を作る。
+ * `hc/{yyyy}/{mm-dd}.json` (1 日 1 ファイル、Android 自動 upload が上書きする) とは
+ * **別 prefix** にすることで、自動 upload に絶対に上書きされない。1 日複数の手動
+ * workout を保持するため zones と同じく id を file 名にする。
+ *
+ * - `startDate` は ISO 8601 文字列。UTC 由来の暦日で yyyy/mm-dd に分割する
+ *   (= D1 `date` 列 / `hc` key と同じ UTC 規約に揃える)
+ * - `id` は manualSessionId() が返す `manual_xxxxxxxxxxxxxxxx` 形式
+ * 不正な startDate / id は null。
+ *
+ * Refs ippoan/HealthConnectReader#6
+ */
+export function manualKeyFor(startDate: string, id: string): UploadKey | null {
+  if (!/^manual_[0-9a-f]{16}$/.test(id)) return null;
+  const ts = Date.parse(startDate);
+  if (Number.isNaN(ts)) return null;
+  const d = new Date(ts);
+  const yyyy = String(d.getUTCFullYear()).padStart(4, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return { yyyy, mmdd: `${mm}-${dd}`, key: `manual/${yyyy}/${mm}-${dd}/${id}.json` };
+}
+
 export interface HistoryBreakdown {
   count: number;
   latest: string | null;

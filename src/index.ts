@@ -20,18 +20,24 @@ import { Hono } from "hono";
 import { apiAuth, verifyAuthCookie } from "./auth";
 import {
   addManualPair,
+  buildManualPayload,
+  deleteWorkout,
   groupAndMatch,
   hcPayloadToRows,
   hcSessionId,
   listGhapiFromDb,
   listKnownHcIds,
+  listManualFromDb,
   listWorkoutsSinceDays,
   listZonesFromDb,
   loadPairSets,
+  manualInputToRow,
+  manualSessionId,
   removeManualPair,
   unpairGroup,
   upsertWorkout,
   zonesPayloadToRow,
+  type ManualWorkoutInput,
 } from "./db";
 import {
   readGhapiWebhookAuthToken,
@@ -42,6 +48,7 @@ import {
 } from "./env";
 import { applySchema } from "./migrations";
 import {
+  manualKeyFor,
   summarizeHistory,
   uploadKeyFor,
   uploadKeyForDateString,
@@ -53,6 +60,7 @@ import {
   GHAPI_DETAIL_HTML,
   INDEX_HTML,
   MANIFEST_JSON,
+  MANUAL_CREATE_HTML,
   SERVICE_WORKER_JS,
   WORKOUT_DETAIL_HTML,
 } from "./ui";
@@ -124,6 +132,26 @@ app.get("/workout", async (c) => {
   }
   if (await verifyAuthCookie(c.env, c.req.header("cookie") ?? "")) {
     return c.html(WORKOUT_DETAIL_HTML);
+  }
+  return c.redirect(buildAuthLoginUrl(c.req.url), 302);
+});
+
+/**
+ * `GET /manual` — 手動 HC データ作成ページ。心拍 (ghapi) を背景に描画しながら
+ * 開始/終了/距離/速度で workout を組み立て、`source='manual'` で保存する。
+ * auth は `/` と同じ 3 経路。Refs ippoan/HealthConnectReader#6
+ */
+app.get("/manual", async (c) => {
+  const expected = await readUploadToken(c.env);
+  if (expected) {
+    const header = c.req.header("authorization") ?? "";
+    const m = /^Bearer\s+(.+)$/i.exec(header);
+    if (m && constantTimeEqualStr(m[1], expected)) {
+      return c.html(MANUAL_CREATE_HTML);
+    }
+  }
+  if (await verifyAuthCookie(c.env, c.req.header("cookie") ?? "")) {
+    return c.html(MANUAL_CREATE_HTML);
   }
   return c.redirect(buildAuthLoginUrl(c.req.url), 302);
 });
@@ -529,7 +557,7 @@ app.post("/_admin/reindex", apiAuth, async (c) => {
   const prefixFilter = c.req.query("prefix");
   const uploadedAt = new Date().toISOString();
   const skipped: Array<{ key: string; reason: string }> = [];
-  let hcFiles = 0, hcRows = 0, zonesFiles = 0, zonesRows = 0;
+  let hcFiles = 0, hcRows = 0, zonesFiles = 0, zonesRows = 0, manualFiles = 0, manualRows = 0;
 
   // HC
   if (!prefixFilter || prefixFilter.startsWith("hc/") || prefixFilter === "hc") {
@@ -585,10 +613,58 @@ app.post("/_admin/reindex", apiAuth, async (c) => {
     } while (cursor);
   }
 
+  // Manual (手動作成) — `manual/{yyyy}/{mm-dd}/{id}.json` を HC payload 構造から
+  // 復元して source='manual' で upsert する。D1 が飛んでも R2 raw から再生できる。
+  if (!prefixFilter || prefixFilter.startsWith("manual/") || prefixFilter === "manual") {
+    const prefix = prefixFilter ?? "manual/";
+    let cursor: string | undefined;
+    do {
+      const page = await c.env.R2.list({ prefix, cursor, limit: 1000 });
+      for (const obj of page.objects) {
+        const m = /^manual\/(\d{4})\/(\d{2})-(\d{2})\/(manual_[0-9a-f]{16})\.json$/.exec(obj.key);
+        if (!m) { skipped.push({ key: obj.key, reason: "bad_manual_layout" }); continue; }
+        const id = m[4];
+        const r = await c.env.R2.get(obj.key);
+        if (!r) { skipped.push({ key: obj.key, reason: "r2_get_null" }); continue; }
+        let payload: unknown;
+        try { payload = JSON.parse(await r.text()); }
+        catch { skipped.push({ key: obj.key, reason: "invalid_json" }); continue; }
+        const sessions = (payload as { sessions?: unknown }).sessions;
+        const s = Array.isArray(sessions) ? sessions[0] : null;
+        if (!s || typeof s !== "object") { skipped.push({ key: obj.key, reason: "no_session" }); continue; }
+        const sess = s as Record<string, unknown>;
+        const distances = (payload as { distances?: unknown }).distances;
+        const d0 = Array.isArray(distances) && distances[0] && typeof distances[0] === "object"
+          ? (distances[0] as { km?: unknown }).km : null;
+        if (typeof sess.startTime !== "string" || typeof sess.endTime !== "string" ||
+            typeof sess.exerciseType !== "number") {
+          skipped.push({ key: obj.key, reason: "bad_session_fields" }); continue;
+        }
+        const row = manualInputToRow(
+          {
+            startTime: sess.startTime,
+            endTime: sess.endTime,
+            exerciseType: sess.exerciseType,
+            title: typeof sess.title === "string" ? sess.title : null,
+            distanceKm: typeof d0 === "number" ? d0 : null,
+          },
+          id,
+          obj.key,
+          uploadedAt,
+        );
+        await upsertWorkout(c.env.DB, row);
+        manualFiles++;
+        manualRows++;
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+
   return c.json({
     ok: true,
     hc_files: hcFiles, hc_rows: hcRows,
     zones_files: zonesFiles, zones_rows: zonesRows,
+    manual_files: manualFiles, manual_rows: manualRows,
     skipped: skipped.slice(0, 50), // first 50 だけ返す (debug 用 cap)
     skipped_total: skipped.length,
   });
@@ -776,6 +852,105 @@ app.post("/api/pair/delete", apiAuth, async (c) => {
     return c.json({ ok: true, hc_id: single.hc_id, zones_id: single.zones_id });
   }
   return c.json({ error: "missing_ids" }, 400);
+});
+
+// =============================================================================
+// 手動作成 HC データ (source='manual') routes
+// Refs ippoan/HealthConnectReader#6
+// =============================================================================
+
+/**
+ * `POST /api/manual` — 手動 workout を 1 件作成 / 更新する。
+ *
+ * body: `{ startTime, endTime, exerciseType, title?, distanceKm? }`
+ *   - startTime / endTime: ISO 8601 (end > start)
+ *   - exerciseType: HC `EXERCISE_TYPE_*` の Int (例 56=ランニング)
+ *   - title: 表示名 (省略時は exerciseType 名)
+ *   - distanceKm: 距離 (km、省略 / 0 なら距離 null)
+ *
+ * `hc/` とは別 prefix (`manual/{yyyy}/{mm-dd}/{id}.json`) + `source='manual'` で
+ * 保存するので、Android の自動 upload に上書きされない。同じ入力での再 POST は
+ * 同 id = upsert で上書き (= 微修正の反映)。
+ */
+app.post("/api/manual", apiAuth, async (c) => {
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: "invalid_json" }, 400); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "expected_object" }, 400);
+  }
+  const b = body as Record<string, unknown>;
+  const startTime = b.startTime;
+  const endTime = b.endTime;
+  const exerciseType = b.exerciseType;
+  if (typeof startTime !== "string" || Number.isNaN(Date.parse(startTime))) {
+    return c.json({ error: "invalid_startTime" }, 400);
+  }
+  if (typeof endTime !== "string" || Number.isNaN(Date.parse(endTime))) {
+    return c.json({ error: "invalid_endTime" }, 400);
+  }
+  if (Date.parse(endTime) <= Date.parse(startTime)) {
+    return c.json({ error: "end_not_after_start" }, 400);
+  }
+  if (typeof exerciseType !== "number" || !Number.isFinite(exerciseType)) {
+    return c.json({ error: "invalid_exerciseType" }, 400);
+  }
+  const title = typeof b.title === "string" ? b.title : null;
+  let distanceKm: number | null = null;
+  if (b.distanceKm !== undefined && b.distanceKm !== null) {
+    if (typeof b.distanceKm !== "number" || !Number.isFinite(b.distanceKm) || b.distanceKm < 0) {
+      return c.json({ error: "invalid_distanceKm" }, 400);
+    }
+    distanceKm = b.distanceKm;
+  }
+
+  const input: ManualWorkoutInput = { startTime, endTime, exerciseType, title, distanceKm };
+  const id = await manualSessionId(startTime, exerciseType, title);
+  const k = manualKeyFor(startTime, id);
+  if (!k) return c.json({ error: "key_build_failed" }, 400);
+
+  const now = new Date().toISOString();
+  const payload = buildManualPayload(input, now);
+  const row = manualInputToRow(input, id, k.key, now);
+  await Promise.all([
+    c.env.R2.put(k.key, JSON.stringify(payload), {
+      httpMetadata: { contentType: "application/json" },
+    }),
+    upsertWorkout(c.env.DB, row),
+  ]);
+  return c.json({ ok: true, id, key: k.key, date: row.date, row });
+});
+
+/**
+ * `GET /api/manual` — 手動作成 workout の一覧 (新しい順)。`{ count, items }`。
+ */
+app.get("/api/manual", apiAuth, async (c) => {
+  const items = await listManualFromDb(c.env.DB);
+  return c.json({ count: items.length, items });
+});
+
+/**
+ * `POST /api/manual/delete` — 手動 workout を 1 件削除する (= 作成の取り消し)。
+ * body: `{ id }`。R2 raw blob と D1 row の両方を消す。idempotent。
+ */
+app.post("/api/manual/delete", apiAuth, async (c) => {
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: "invalid_json" }, 400); }
+  if (!body || typeof body !== "object") return c.json({ error: "expected_object" }, 400);
+  const id = (body as { id?: unknown }).id;
+  if (typeof id !== "string" || !id) return c.json({ error: "missing_id" }, 400);
+  // R2 key は row の raw_key を正とする (無ければ start_at から再計算)。
+  const row = await c.env.DB.prepare(
+    "SELECT raw_key, start_at FROM workouts WHERE source = 'manual' AND id = ?",
+  ).bind(id).first<{ raw_key?: string; start_at?: string }>();
+  let rawKey = row?.raw_key;
+  if (!rawKey && typeof row?.start_at === "string") {
+    rawKey = manualKeyFor(row.start_at, id)?.key;
+  }
+  await Promise.all([
+    rawKey ? c.env.R2.delete(rawKey) : Promise.resolve(),
+    deleteWorkout(c.env.DB, "manual", id),
+  ]);
+  return c.json({ ok: true, id, deleted_key: rawKey ?? null });
 });
 
 // =============================================================================

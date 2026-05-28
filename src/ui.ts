@@ -131,6 +131,19 @@ export const INDEX_HTML = `<!doctype html>
     <p id="status" class="text-sm text-slate-600 min-h-[1.25rem]"></p>
   </section>
 
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold">HC データを手動作成</h2>
+    <p class="text-xs text-slate-500">
+      Health Connect から取れなかった / 消えた workout を、心拍データを背景に
+      開始・終了・距離・速度から手で組み立てて保存します。自動 Upload とは別管理
+      (source=manual) なので上書きされません。
+    </p>
+    <a href="/manual"
+      class="block w-full text-center bg-amber-600 text-white font-semibold py-3 rounded-xl active:bg-amber-700">
+      ＋ 手動でワークアウトを作成
+    </a>
+  </section>
+
   <section class="bg-white rounded-2xl shadow p-4 space-y-3">
     <h2 class="font-semibold">Zones (iPhone) JSON を upload</h2>
     <p class="text-xs text-slate-500">
@@ -399,6 +412,7 @@ function badge(type) {
   if (type === "matched") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800">突合</span>';
   if (type === "hc_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800">HC のみ</span>';
   if (type === "ghapi_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-fuchsia-100 text-fuchsia-800">Google Health</span>';
+  if (type === "manual_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-200 text-amber-900">手動作成</span>';
   return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-100 text-amber-800">Zones のみ</span>';
 }
 function renderItem(it) {
@@ -485,6 +499,22 @@ function renderItem(it) {
       '</div>',
     ].join("");
   }
+  if (it.type === "manual_only") {
+    const mn = it.manual;
+    return [
+      '<div class="border-l-2 border-amber-400 pl-2 py-1 flex items-start justify-between">',
+      '<div>',
+      '<div class="text-xs font-medium">', badge("manual_only"),
+      ' ', fmtTime(mn.start_at), '–', fmtTime(mn.end_at),
+      ' ', escapeHtml(mn.activity_name || "—"), '</div>',
+      '<div class="text-[11px] text-slate-600">手動: ', fmtKm(mn.distance_m),
+      ' / ', fmtDur(mn.duration_sec), ' / ', fmtKmh(mn.distance_m, mn.duration_sec), '</div>',
+      '</div>',
+      '<button class="text-[10px] text-rose-600 hover:underline shrink-0" ',
+        'data-action="manual-delete" data-id="', escapeHtml(mn.id), '">削除</button>',
+      '</div>',
+    ].join("");
+  }
   const z = it.zones;
   return [
     '<div class="border-l-2 border-amber-300 pl-2 py-1 flex items-start justify-between">',
@@ -553,7 +583,8 @@ async function refreshWorkouts() {
     html.push('<summary class="cursor-pointer select-none px-3 py-2 text-sm flex items-center justify-between">');
     html.push('<span class="font-medium">', day.date, '</span>');
     html.push('<span class="text-[11px] text-slate-500">HC ', day.hc_count, ' / Zones ', day.zones_count,
-              (day.ghapi_count ? ' / GH ' + day.ghapi_count : ''), ' / 突合 ', day.matched_count, '</span>');
+              (day.ghapi_count ? ' / GH ' + day.ghapi_count : ''),
+              (day.manual_count ? ' / 手動 ' + day.manual_count : ''), ' / 突合 ', day.matched_count, '</span>');
     html.push('</summary>');
     html.push('<div class="px-3 pb-2 space-y-1">');
     for (const it of day.items) html.push(renderItem(it));
@@ -663,7 +694,23 @@ function onWorkoutsListClick(ev) {
       const zIds = JSON.parse(btn.getAttribute("data-zones-ids") || "[]");
       unpairGroup(hcIds, zIds);
     } catch (e) { /* ignore */ }
+  } else if (action === "manual-delete") {
+    deleteManual(btn.getAttribute("data-id"));
   }
+}
+
+// 手動作成 workout を削除 (R2 + D1)。日付別ビューの「削除」ボタンから。
+async function deleteManual(id) {
+  if (!id) return;
+  if (!confirm("この手動作成データを削除しますか？")) return;
+  const r = await fetch("/api/manual/delete", authFetchInit({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: id }),
+  }));
+  if (!r.ok) { alert("削除失敗 " + r.status); return; }
+  refreshWorkouts().catch(() => {});
+  refreshHistory().catch(() => {});
 }
 
 // =============================================================================
@@ -2067,6 +2114,422 @@ async function load() {
   renderSingle(j);
 }
 load();
+</script>
+</body>
+</html>`;
+
+/**
+ * `GET /manual` で配信する「HC データ手動作成」ページ。
+ *
+ * Health Connect から取れなかった / 消えた workout を手で組み立てて
+ * `source='manual'` で保存する。`/ghapi/workout` の心拍ビューを参考に、
+ * Google Health の HR 時系列を背景に折れ線描画し、距離・速度から継続時間を
+ * 算出、開始時刻をスライダーで横にずらして HR の山に窓を合わせる。
+ *
+ * Refs ippoan/HealthConnectReader#6
+ */
+export const MANUAL_CREATE_HTML = `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>HC データ手動作成 — HC Reader</title>
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<meta name="theme-color" content="#059669" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+<div class="max-w-3xl mx-auto p-4 space-y-4">
+  <header class="flex items-center justify-between pt-2">
+    <a href="/" class="text-sm text-emerald-700">‹ 戻る</a>
+    <h1 class="text-lg font-semibold">HC データ手動作成</h1>
+    <span></span>
+  </header>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold text-sm">1. 基準にする心拍データ</h2>
+    <p class="text-[11px] text-slate-500">
+      Google Health の workout を選ぶと、その心拍 (bpm) を背景に描画し、開始時刻の
+      初期値に使います。「日付を直接指定」を選べば心拍なしで時刻だけ手入力できます。
+    </p>
+    <select id="anchor-select" class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm">
+      <option value="">読込中…</option>
+    </select>
+    <p id="anchor-status" class="text-[11px] text-slate-500 min-h-[1rem]"></p>
+  </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-3">
+    <h2 class="font-semibold text-sm">2. ワークアウト内容</h2>
+    <div class="grid grid-cols-2 gap-3">
+      <label class="text-xs text-slate-600 space-y-1">
+        <span>種目</span>
+        <select id="ex-select" class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm"></select>
+      </label>
+      <label class="text-xs text-slate-600 space-y-1">
+        <span>名称 (任意)</span>
+        <input id="title-input" type="text" placeholder="例: 朝ラン"
+          class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm" />
+      </label>
+      <label class="text-xs text-slate-600 space-y-1">
+        <span>距離 (km)</span>
+        <input id="distance-input" type="number" step="0.01" min="0" inputmode="decimal"
+          class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm" />
+      </label>
+      <label class="text-xs text-slate-600 space-y-1">
+        <span>平均速度 (km/h)</span>
+        <input id="speed-input" type="number" step="0.1" min="0" inputmode="decimal"
+          class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm" />
+      </label>
+    </div>
+    <label class="text-xs text-slate-600 space-y-1 block">
+      <span>継続時間 (分) — 距離 ÷ 速度 で自動計算 (手修正可)</span>
+      <input id="duration-input" type="number" step="0.1" min="0" inputmode="decimal"
+        class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm" />
+    </label>
+  </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-3">
+    <h2 class="font-semibold text-sm">3. 開始時刻を心拍に合わせる</h2>
+    <label class="text-xs text-slate-600 space-y-1 block">
+      <span>基準の開始時刻</span>
+      <input id="start-dt" type="datetime-local"
+        class="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm" />
+    </label>
+    <div class="flex items-center gap-2 text-[12px]">
+      <span class="text-sky-600 font-medium shrink-0">横ずらし</span>
+      <button id="off-minus" type="button" class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">−</button>
+      <input id="off-range" type="range" min="-120" max="120" step="0.5" value="0" class="flex-1 min-w-[120px] accent-sky-600" />
+      <button id="off-plus" type="button" class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">＋</button>
+      <span id="off-val" class="tabular-nums w-14 text-right text-slate-500 shrink-0">0.0 分</span>
+      <button id="off-reset" type="button" class="px-2 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0">リセット</button>
+    </div>
+    <p id="window-label" class="text-sm font-medium text-slate-700">開始 — / 終了 — / 継続 —</p>
+    <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し (時刻だけ手入力できます)</p>
+    <canvas id="hr-chart" height="200"></canvas>
+  </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <button id="create-btn" type="button"
+      class="w-full bg-amber-600 text-white font-semibold py-3 rounded-xl active:bg-amber-700">
+      この内容で作成
+    </button>
+    <p id="create-status" class="text-sm text-slate-600 min-h-[1.25rem]"></p>
+  </section>
+
+  <section class="bg-white rounded-2xl shadow p-4 space-y-2">
+    <h2 class="font-semibold text-sm">作成済みの手動データ</h2>
+    <ul id="manual-list" class="text-xs text-slate-600 divide-y divide-slate-100">
+      <li class="py-1 text-slate-400">読込中…</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+var $ = function (id) { return document.getElementById(id); };
+function authHeaders() {
+  try {
+    if (window.HC && typeof window.HC.getUploadToken === "function") {
+      var t = window.HC.getUploadToken();
+      if (t) return { Authorization: "Bearer " + t };
+    }
+  } catch (e) {}
+  return {};
+}
+function authFetch(url, extra) {
+  extra = extra || {};
+  var init = { credentials: "include" };
+  for (var k in extra) if (k !== "headers") init[k] = extra[k];
+  init.headers = Object.assign({}, authHeaders(), extra.headers || {});
+  return fetch(url, init);
+}
+function esc(s) {
+  var d = document.createElement("div");
+  d.textContent = String(s == null ? "" : s);
+  return d.innerHTML;
+}
+function pad2(n) { return String(n).padStart(2, "0"); }
+function fmtClock(ms) { var d = new Date(ms); return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); }
+function fmtDurMin(sec) {
+  if (sec == null) return "—";
+  var h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return (h > 0 ? h + "h " : "") + m + "m";
+}
+function toLocalInput(ms) {
+  var d = new Date(ms);
+  return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) +
+    "T" + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+}
+function buildIso(ms) { return new Date(ms).toISOString(); }
+
+var EX = [[56, "ランニング"], [79, "ウォーキング"], [8, "サイクリング"], [37, "ハイキング"], [69, "水泳(プール)"], [70, "水泳(オープン)"]];
+
+var chart = null;
+var hrDatasetIdx = -1;   // 心拍系列の dataset index (無ければ -1)
+var winDatasetIdx = -1;  // ワークアウト窓 (速度帯) の dataset index
+var anchors = {};        // value -> { id, source, start_at, hasHr, label }
+
+// 距離 ÷ 速度 → 継続時間(分) を duration-input に自動セット。
+function recomputeDuration() {
+  var dist = parseFloat($("distance-input").value);
+  var speed = parseFloat($("speed-input").value);
+  if (dist > 0 && speed > 0) {
+    var min = (dist / speed) * 60;
+    $("duration-input").value = (Math.round(min * 10) / 10);
+  }
+  updateWindow();
+}
+
+function currentStartMs() {
+  var base = $("start-dt").value ? new Date($("start-dt").value).getTime() : NaN;
+  if (isNaN(base)) return NaN;
+  var off = parseFloat($("off-range").value) || 0;
+  return base + off * 60000;
+}
+function currentDurationSec() {
+  var min = parseFloat($("duration-input").value);
+  return (min > 0) ? Math.round(min * 60) : null;
+}
+function bandSpeed() {
+  var dist = parseFloat($("distance-input").value);
+  var durSec = currentDurationSec();
+  if (dist > 0 && durSec) return (dist) / (durSec / 3600);
+  var speed = parseFloat($("speed-input").value);
+  return speed > 0 ? speed : 1;
+}
+
+// スライダー / 入力変更のたびに窓ラベルとチャートの速度帯を更新する。
+function updateWindow() {
+  var off = parseFloat($("off-range").value) || 0;
+  $("off-val").textContent = (off > 0 ? "+" : "") + off.toFixed(1) + " 分";
+  var startMs = currentStartMs();
+  var durSec = currentDurationSec();
+  if (isNaN(startMs) || !durSec) {
+    $("window-label").textContent = "開始 — / 終了 — / 継続 —";
+  } else {
+    var endMs = startMs + durSec * 1000;
+    $("window-label").textContent =
+      "開始 " + fmtClock(startMs) + " / 終了 " + fmtClock(endMs) +
+      " / 継続 " + fmtDurMin(durSec);
+  }
+  if (chart && winDatasetIdx >= 0 && !isNaN(startMs) && durSec) {
+    var v = bandSpeed();
+    var endMs2 = startMs + durSec * 1000;
+    chart.data.datasets[winDatasetIdx].data = [{ x: startMs, y: v }, { x: endMs2, y: v }];
+    chart.data.datasets[winDatasetIdx].label = "ワークアウト窓 " + v.toFixed(1) + "km/h";
+    chart.update("none");
+  }
+}
+
+function ensureChart() {
+  if (chart) return;
+  chart = new Chart($("hr-chart").getContext("2d"), {
+    type: "line",
+    data: { datasets: [] },
+    options: {
+      responsive: true,
+      interaction: { intersect: false, mode: "index" },
+      scales: {
+        x: { type: "linear", ticks: { callback: function (v) { return fmtClock(v); }, maxTicksLimit: 8 } },
+        hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
+        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
+      },
+      plugins: {
+        legend: { labels: { boxWidth: 12, font: { size: 10 } } },
+        tooltip: { callbacks: { title: function (items) { return items && items.length ? fmtClock(items[0].parsed.x) : ""; } } },
+      },
+    },
+  });
+  // 速度帯 (ワークアウト窓) dataset を確保
+  chart.data.datasets.push({
+    label: "ワークアウト窓",
+    data: [], yAxisID: "speed", borderColor: "#ea580c",
+    backgroundColor: "rgba(234,88,12,0.20)", borderWidth: 3,
+    pointRadius: 0, fill: true,
+  });
+  winDatasetIdx = chart.data.datasets.length - 1;
+}
+
+function setHrSamples(samples) {
+  ensureChart();
+  // 既存 HR 系列を除去
+  if (hrDatasetIdx >= 0) {
+    chart.data.datasets.splice(hrDatasetIdx, 1);
+    if (winDatasetIdx > hrDatasetIdx) winDatasetIdx--;
+    hrDatasetIdx = -1;
+  }
+  if (samples && samples.length) {
+    chart.data.datasets.push({
+      label: "心拍 (bpm)",
+      data: samples.map(function (s) { return { x: s.t, y: s.bpm }; }),
+      yAxisID: "hr", borderColor: "#e11d48", backgroundColor: "rgba(225,29,72,0.08)",
+      borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: true,
+    });
+    hrDatasetIdx = chart.data.datasets.length - 1;
+    $("chart-empty").classList.add("hidden");
+  } else {
+    $("chart-empty").classList.remove("hidden");
+  }
+  chart.update("none");
+}
+
+// 基準 (anchor) を選んだ時: 開始時刻をセットし、ghapi なら HR を背景に流す。
+async function onAnchorChange() {
+  var val = $("anchor-select").value;
+  $("off-range").value = "0";
+  if (!val) {
+    // 日付直接指定: HR なし、開始は現状の datetime-local を尊重
+    setHrSamples(null);
+    $("anchor-status").textContent = "心拍なし。開始時刻を手入力してください。";
+    updateWindow();
+    return;
+  }
+  var a = anchors[val];
+  if (!a) { updateWindow(); return; }
+  if (a.start_at) $("start-dt").value = toLocalInput(Date.parse(a.start_at));
+  if (a.hasHr) {
+    $("anchor-status").textContent = "心拍を取得中…";
+    try {
+      var r = await authFetch("/api/ghapi/workout?id=" + encodeURIComponent(a.id));
+      var j = await r.json();
+      setHrSamples(Array.isArray(j.samples) ? j.samples : null);
+      $("anchor-status").textContent = "心拍 " + ((j.samples || []).length) + " 点を背景表示";
+    } catch (e) {
+      setHrSamples(null);
+      $("anchor-status").textContent = "心拍取得失敗: " + e;
+    }
+  } else {
+    setHrSamples(null);
+    $("anchor-status").textContent = a.label + " を基準に開始時刻を設定 (心拍なし)";
+  }
+  updateWindow();
+}
+
+// /api/workouts から基準候補を集める (manual は除外、ghapi は HR 背景可)。
+async function loadAnchors() {
+  var sel = $("anchor-select");
+  try {
+    var r = await authFetch("/api/workouts?days=90");
+    var j = await r.json();
+    var opts = [];
+    (j.days || []).forEach(function (day) {
+      (day.items || []).forEach(function (it) {
+        function add(row, source, hasHr) {
+          if (!row || !row.start_at) return;
+          var ms = Date.parse(row.start_at);
+          var label = fmtDate2(ms) + " " + fmtClock(ms) + " " + (row.activity_name || source);
+          var key = source + ":" + row.id;
+          anchors[key] = { id: row.id, source: source, start_at: row.start_at, hasHr: hasHr, label: label };
+          opts.push({ key: key, label: (hasHr ? "♥ " : "") + label });
+        }
+        if (it.type === "ghapi_only") add(it.ghapi, "ghapi", true);
+        else if (it.type === "hc_only") add(it.hc, "hc", false);
+        else if (it.type === "zones_only") add(it.zones, "zones", false);
+        else if (it.type === "matched") {
+          (it.hcs || []).forEach(function (h) { add(h, "hc", false); });
+          (it.zoneses || []).forEach(function (z) { add(z, "zones", false); });
+        }
+      });
+    });
+    var html = '<option value="">— 日付を直接指定 (心拍なし) —</option>';
+    html += opts.map(function (o) { return '<option value="' + esc(o.key) + '">' + esc(o.label) + "</option>"; }).join("");
+    sel.innerHTML = html;
+  } catch (e) {
+    sel.innerHTML = '<option value="">候補取得失敗</option>';
+  }
+}
+function fmtDate2(ms) { var d = new Date(ms); return pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
+
+async function createManual() {
+  var startMs = currentStartMs();
+  var durSec = currentDurationSec();
+  var ex = Number($("ex-select").value);
+  var status = $("create-status");
+  if (isNaN(startMs)) { status.textContent = "開始時刻が未設定です"; return; }
+  if (!durSec) { status.textContent = "距離+速度 または 継続時間を入力してください"; return; }
+  var dist = parseFloat($("distance-input").value);
+  var body = {
+    startTime: buildIso(startMs),
+    endTime: buildIso(startMs + durSec * 1000),
+    exerciseType: ex,
+    title: $("title-input").value || undefined,
+    distanceKm: (dist > 0 ? dist : null),
+  };
+  status.textContent = "作成中…";
+  var r = await authFetch("/api/manual", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    var t = await r.text().catch(function () { return ""; });
+    status.textContent = "作成失敗 " + r.status + ": " + t.slice(0, 160);
+    return;
+  }
+  var j = await r.json();
+  status.textContent = "✓ 作成: " + j.date + " " + fmtClock(startMs) + "–" + fmtClock(startMs + durSec * 1000);
+  refreshManualList();
+}
+
+async function refreshManualList() {
+  var list = $("manual-list");
+  var r = await authFetch("/api/manual");
+  if (!r.ok) { list.innerHTML = '<li class="py-1 text-rose-600">取得失敗 ' + r.status + "</li>"; return; }
+  var j = await r.json();
+  if (!j.items || j.items.length === 0) { list.innerHTML = '<li class="py-1 text-slate-400">なし</li>'; return; }
+  list.innerHTML = j.items.map(function (it) {
+    var ms = it.start_at ? Date.parse(it.start_at) : null;
+    var km = it.distance_m != null ? (it.distance_m / 1000).toFixed(2) + "km" : "—";
+    return '<li class="py-1 flex justify-between items-center gap-2">' +
+      '<span>' + esc(ms ? fmtDate2(ms) + " " + fmtClock(ms) : it.date) + " " +
+      esc(it.activity_name || "—") + " · " + km + " / " + fmtDurMin(it.duration_sec) + "</span>" +
+      '<button class="text-rose-600 hover:underline shrink-0" data-del="' + esc(it.id) + '">削除</button>' +
+      "</li>";
+  }).join("");
+}
+
+async function deleteManual(id) {
+  if (!id || !confirm("削除しますか？")) return;
+  var r = await authFetch("/api/manual/delete", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: id }),
+  });
+  if (!r.ok) { alert("削除失敗 " + r.status); return; }
+  refreshManualList();
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  // 種目 select
+  $("ex-select").innerHTML = EX.map(function (e) { return '<option value="' + e[0] + '">' + esc(e[1]) + "</option>"; }).join("");
+  // 開始時刻 default = now
+  $("start-dt").value = toLocalInput(Date.now());
+  ensureChart();
+  $("anchor-select").addEventListener("change", onAnchorChange);
+  $("distance-input").addEventListener("input", recomputeDuration);
+  $("speed-input").addEventListener("input", recomputeDuration);
+  $("duration-input").addEventListener("input", updateWindow);
+  $("start-dt").addEventListener("input", updateWindow);
+  $("off-range").addEventListener("input", updateWindow);
+  function step(d) {
+    var rng = $("off-range");
+    rng.value = String(Math.min(Number(rng.max), Math.max(Number(rng.min), Number(rng.value) + d)));
+    updateWindow();
+  }
+  $("off-minus").addEventListener("click", function () { step(-0.5); });
+  $("off-plus").addEventListener("click", function () { step(0.5); });
+  $("off-reset").addEventListener("click", function () { $("off-range").value = "0"; updateWindow(); });
+  $("create-btn").addEventListener("click", createManual);
+  $("manual-list").addEventListener("click", function (ev) {
+    var b = ev.target.closest && ev.target.closest("button[data-del]");
+    if (b) deleteManual(b.getAttribute("data-del"));
+  });
+  loadAnchors();
+  refreshManualList();
+  updateWindow();
+});
 </script>
 </body>
 </html>`;

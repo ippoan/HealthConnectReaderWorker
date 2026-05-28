@@ -3,15 +3,21 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import app from "../src/index";
 import {
+  buildManualPayload,
+  deleteWorkout,
   groupAndMatch,
   hcPayloadToRows,
+  listManualFromDb,
   listWorkouts,
+  manualInputToRow,
+  manualSessionId,
   pairHcZones,
+  upsertWorkout,
   zonesPayloadToRow,
 } from "../src/db";
 import type { WorkoutRow } from "../src/db";
 import { applySchema } from "../src/migrations";
-import { summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
+import { manualKeyFor, summarizeHistory, uploadKeyFor, zonesKeyFor } from "../src/r2";
 
 // D1 schema は production と同じ `applySchema` で test DB にも適用する
 // (= production の `POST /_admin/migrate` と完全同じ経路)。
@@ -2389,5 +2395,253 @@ describe("404", () => {
     const r = await app.request("/nope", {}, env);
     expect(r.status).toBe(404);
     expect(await r.json()).toEqual({ error: "not_found" });
+  });
+});
+
+// =============================================================================
+// 手動作成 HC データ (source='manual') — Refs ippoan/HealthConnectReader#6
+// =============================================================================
+
+describe("manualKeyFor", () => {
+  it("derives manual/{yyyy}/{mm-dd}/{id}.json from UTC startDate", () => {
+    const k = manualKeyFor("2026-05-25T19:38:43Z", "manual_0123456789abcdef");
+    expect(k).toEqual({
+      yyyy: "2026",
+      mmdd: "05-25",
+      key: "manual/2026/05-25/manual_0123456789abcdef.json",
+    });
+  });
+  it("returns null for invalid id", () => {
+    expect(manualKeyFor("2026-05-25T00:00:00Z", "nope")).toBeNull();
+    expect(manualKeyFor("2026-05-25T00:00:00Z", "manual_XYZ")).toBeNull();
+  });
+  it("returns null for invalid startDate", () => {
+    expect(manualKeyFor("not-a-date", "manual_0123456789abcdef")).toBeNull();
+  });
+});
+
+describe("manualSessionId / buildManualPayload / manualInputToRow", () => {
+  it("manualSessionId is stable + matches manualKeyFor regex", async () => {
+    const a = await manualSessionId("2026-05-25T06:00:00Z", 56, "朝ラン");
+    const b = await manualSessionId("2026-05-25T06:00:00Z", 56, "朝ラン");
+    expect(a).toBe(b);
+    expect(a).toMatch(/^manual_[0-9a-f]{16}$/);
+    const c = await manualSessionId("2026-05-25T06:00:00Z", 56, "違うタイトル");
+    expect(c).not.toBe(a);
+  });
+
+  it("buildManualPayload builds HC-shaped payload with distance", () => {
+    const p = buildManualPayload(
+      { startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: 56, title: "朝ラン", distanceKm: 5 },
+      "2026-05-25T07:00:00Z",
+    );
+    expect(p.date).toBe("2026-05-25");
+    expect(p.manual).toBe(true);
+    expect((p.sessions as unknown[]).length).toBe(1);
+    expect((p.distances as unknown[]).length).toBe(1);
+    expect((p.distances as Array<{ km: number }>)[0].km).toBe(5);
+    expect(p.speeds).toEqual([]);
+  });
+
+  it("buildManualPayload omits distances when distanceKm missing/zero", () => {
+    const p = buildManualPayload(
+      { startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: 79, distanceKm: 0 },
+      "2026-05-25T07:00:00Z",
+    );
+    expect(p.distances).toEqual([]);
+  });
+
+  it("manualInputToRow computes duration + distance_m, falls back to exercise name", () => {
+    const row = manualInputToRow(
+      { startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: 56, title: null, distanceKm: 5 },
+      "manual_0123456789abcdef",
+      "manual/2026/05-25/manual_0123456789abcdef.json",
+      "2026-05-25T07:00:00Z",
+    );
+    expect(row.source).toBe("manual");
+    expect(row.duration_sec).toBe(1800);
+    expect(row.distance_m).toBe(5000);
+    expect(row.activity_name).toBe("ランニング");
+    expect(row.date).toBe("2026-05-25");
+  });
+
+  it("manualInputToRow keeps null distance + custom title", () => {
+    const row = manualInputToRow(
+      { startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: 999, title: "カスタム" },
+      "manual_0123456789abcdef",
+      "k",
+      "u",
+    );
+    expect(row.distance_m).toBeNull();
+    expect(row.activity_name).toBe("カスタム");
+  });
+});
+
+describe("groupAndMatch with manual rows", () => {
+  it("emits manual_only items and manual_count", () => {
+    const rows: WorkoutRow[] = [
+      manualInputToRow(
+        { startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: 56, distanceKm: 5 },
+        "manual_aaaaaaaaaaaaaaaa", "k1", "u",
+      ),
+    ];
+    const days = groupAndMatch(rows);
+    expect(days.length).toBe(1);
+    expect(days[0].manual_count).toBe(1);
+    expect(days[0].items[0].type).toBe("manual_only");
+  });
+});
+
+describe("POST /api/manual", () => {
+  it("401 without bearer", async () => {
+    const r = await app.request("/api/manual", { method: "POST", body: "{}" }, env);
+    expect(r.status).toBe(401);
+  });
+  it("400 on invalid json", async () => {
+    const r = await app.request(
+      "/api/manual",
+      { method: "POST", headers: auth(), body: "{" },
+      env,
+    );
+    expect(r.status).toBe(400);
+  });
+  it("400 on invalid startTime", async () => {
+    const r = await app.request(
+      "/api/manual",
+      { method: "POST", headers: auth(), body: JSON.stringify({ startTime: "x", endTime: "2026-05-25T06:30:00Z", exerciseType: 56 }) },
+      env,
+    );
+    expect(((await r.json()) as { error: string }).error).toBe("invalid_startTime");
+  });
+  it("400 when end not after start", async () => {
+    const r = await app.request(
+      "/api/manual",
+      { method: "POST", headers: auth(), body: JSON.stringify({ startTime: "2026-05-25T06:30:00Z", endTime: "2026-05-25T06:00:00Z", exerciseType: 56 }) },
+      env,
+    );
+    expect(((await r.json()) as { error: string }).error).toBe("end_not_after_start");
+  });
+  it("400 on invalid exerciseType / distanceKm", async () => {
+    const r1 = await app.request(
+      "/api/manual",
+      { method: "POST", headers: auth(), body: JSON.stringify({ startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: "x" }) },
+      env,
+    );
+    expect(((await r1.json()) as { error: string }).error).toBe("invalid_exerciseType");
+    const r2 = await app.request(
+      "/api/manual",
+      { method: "POST", headers: auth(), body: JSON.stringify({ startTime: "2026-05-25T06:00:00Z", endTime: "2026-05-25T06:30:00Z", exerciseType: 56, distanceKm: -1 }) },
+      env,
+    );
+    expect(((await r2.json()) as { error: string }).error).toBe("invalid_distanceKm");
+  });
+  it("200 creates manual workout (R2 + D1)", async () => {
+    const r = await app.request(
+      "/api/manual",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startTime: "2026-03-10T06:00:00Z",
+          endTime: "2026-03-10T06:30:00Z",
+          exerciseType: 56,
+          title: "テストラン",
+          distanceKm: 5,
+        }),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { ok: boolean; id: string; key: string };
+    expect(j.ok).toBe(true);
+    expect(j.id).toMatch(/^manual_[0-9a-f]{16}$/);
+    expect(j.key).toBe("manual/2026/03-10/" + j.id + ".json");
+    // R2 raw が HC payload 構造で書かれている
+    const obj = await env.R2.get(j.key);
+    expect(obj).not.toBeNull();
+    const stored = JSON.parse(await obj!.text());
+    expect(stored.manual).toBe(true);
+    expect(stored.sessions[0].exerciseType).toBe(56);
+    // D1 に source='manual' で入っている
+    const list = await listManualFromDb(env.DB);
+    expect(list.some((w) => w.id === j.id)).toBe(true);
+  });
+});
+
+describe("GET /api/manual + POST /api/manual/delete", () => {
+  it("401 without bearer (list)", async () => {
+    const r = await app.request("/api/manual", {}, env);
+    expect(r.status).toBe(401);
+  });
+  it("lists then deletes (R2 + D1 both gone)", async () => {
+    const create = await app.request(
+      "/api/manual",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startTime: "2026-04-15T22:00:00Z",
+          endTime: "2026-04-15T22:45:00Z",
+          exerciseType: 79,
+          distanceKm: 3,
+        }),
+      },
+      env,
+    );
+    const cj = (await create.json()) as { id: string; key: string };
+    const id = cj.id;
+
+    const listR = await app.request("/api/manual", { headers: auth() }, env);
+    const lj = (await listR.json()) as { items: WorkoutRow[] };
+    expect(lj.items.some((w) => w.id === id)).toBe(true);
+
+    const del = await app.request(
+      "/api/manual/delete",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body: JSON.stringify({ id }) },
+      env,
+    );
+    expect(del.status).toBe(200);
+    expect(((await del.json()) as { ok: boolean }).ok).toBe(true);
+    expect(await env.R2.get(cj.key)).toBeNull();
+    const after = await listManualFromDb(env.DB);
+    expect(after.some((w) => w.id === id)).toBe(false);
+  });
+  it("400 missing id on delete", async () => {
+    const r = await app.request(
+      "/api/manual/delete",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      env,
+    );
+    expect(((await r.json()) as { error: string }).error).toBe("missing_id");
+  });
+});
+
+describe("deleteWorkout / listManualFromDb helpers", () => {
+  it("deleteWorkout removes a row by (source,id)", async () => {
+    await upsertWorkout(
+      env.DB,
+      manualInputToRow(
+        { startTime: "2026-02-01T06:00:00Z", endTime: "2026-02-01T06:20:00Z", exerciseType: 56, distanceKm: 2 },
+        "manual_bbbbbbbbbbbbbbbb", "k", "u",
+      ),
+    );
+    let list = await listManualFromDb(env.DB);
+    expect(list.some((w) => w.id === "manual_bbbbbbbbbbbbbbbb")).toBe(true);
+    await deleteWorkout(env.DB, "manual", "manual_bbbbbbbbbbbbbbbb");
+    list = await listManualFromDb(env.DB);
+    expect(list.some((w) => w.id === "manual_bbbbbbbbbbbbbbbb")).toBe(false);
+  });
+});
+
+describe("GET /manual page", () => {
+  it("200 HTML with Bearer", async () => {
+    const r = await app.request("/manual", { headers: auth() }, env);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toMatch(/text\/html/);
+    expect(await r.text()).toContain("HC データ手動作成");
+  });
+  it("302 without auth", async () => {
+    const r = await app.request("/manual", {}, env);
+    expect(r.status).toBe(302);
   });
 });
