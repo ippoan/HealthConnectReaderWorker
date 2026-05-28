@@ -19,6 +19,10 @@ Refs ippoan/HealthConnectReader#6
 | POST   | `/api/upload-zones`  | Bearer **or** cookie | iOS Zones (Apple Watch) workout JSON 1 件を R2 (`zones/yyyy/mm-dd/{uuid}.json`) + D1 `workouts` に並列保存 |
 | GET    | `/api/history`       | Bearer **or** cookie | R2 `hc/` listing → `{ count, latest }` を返す              |
 | GET    | `/api/zones`         | Bearer **or** cookie | D1 `workouts` (source='zones') を `uploaded_at` desc で → `{ count, items: [{date, uuid, key, uploaded}] }` |
+| GET    | `/manual`            | Bearer **or** cookie | 手動 HC データ作成 UI。心拍 (ghapi) を背景に開始/終了/距離/速度で workout を組み立てる (Refs HealthConnectReader#6) |
+| POST   | `/api/manual`        | Bearer **or** cookie | 手動 workout を 1 件作成/更新。`{startTime,endTime,exerciseType,title?,distanceKm?}` を `manual/yyyy/mm-dd/{id}.json` + D1 `source='manual'` に保存 (自動 upload に上書きされない) |
+| GET    | `/api/manual`        | Bearer **or** cookie | 手動作成 workout 一覧 → `{ count, items }` |
+| POST   | `/api/manual/delete` | Bearer **or** cookie | 手動 workout を削除 (R2 + D1)。`{id}`。作成の取り消し (undo) |
 | POST   | `/_admin/migrate`    | Bearer **or** cookie | `src/migrations.ts` の `SCHEMA_STATEMENTS` を D1 に idempotent 適用 |
 | GET    | `/ghapi/connect`     | cookie            | auth-worker の Google Health OAuth redirect へ 302 (Refs #60) |
 | GET    | `/api/ghapi/connected` | cookie          | OAuth 完了後の landing HTML                                |

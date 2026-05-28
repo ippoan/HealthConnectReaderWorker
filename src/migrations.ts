@@ -14,7 +14,7 @@
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS workouts (
     id TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('hc', 'zones', 'ghapi')),
+    source TEXT NOT NULL CHECK (source IN ('hc', 'zones', 'ghapi', 'manual')),
     date TEXT NOT NULL,
     start_at TEXT,
     end_at TEXT,
@@ -64,15 +64,15 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
 /**
  * `workouts.source` の CHECK constraint を緩めるリビルド。
  *
- * 既存 DB は `CHECK (source IN ('hc','zones'))` で生成されており SQLite は
- * CHECK の ALTER を持たないため、`'ghapi'` を許す新テーブルに rename-copy で
- * 差し替える。新環境 (= 上の CREATE TABLE が走った直後) では既に
- * `'ghapi'` を含む CHECK が入っているので no-op になる。
+ * 既存 DB は `CHECK (source IN ('hc','zones'))` ないし `(... 'ghapi')` で生成
+ * されており SQLite は CHECK の ALTER を持たないため、`'manual'` まで許す新
+ * テーブルに rename-copy で差し替える。新環境 (= 上の CREATE TABLE が走った
+ * 直後) では既に `'manual'` を含む CHECK が入っているので no-op になる。
  *
  * idempotent 化:
  *   - sqlite_master の `workouts` 行の `sql` カラムを inspect
- *   - `'ghapi'` 文字列を含めば skip (既に新 schema)
- *   - 含まなければ tx で rebuild
+ *   - `'manual'` 文字列を含めば skip (既に最新 schema)
+ *   - 含まなければ tx で rebuild ('ghapi' だけ許す旧 schema も拾われる)
  *
  * Refs ippoan/HealthConnectReaderWorker#60
  */
@@ -85,12 +85,12 @@ export async function widenWorkoutsSourceCheck(
     )
     .first<{ sql: string | null }>();
   if (!row || !row.sql) return { rebuilt: false };
-  if (row.sql.includes("'ghapi'")) return { rebuilt: false };
+  if (row.sql.includes("'manual'")) return { rebuilt: false };
 
   await db.batch([
     db.prepare(`CREATE TABLE workouts_new (
       id TEXT NOT NULL,
-      source TEXT NOT NULL CHECK (source IN ('hc', 'zones', 'ghapi')),
+      source TEXT NOT NULL CHECK (source IN ('hc', 'zones', 'ghapi', 'manual')),
       date TEXT NOT NULL,
       start_at TEXT,
       end_at TEXT,

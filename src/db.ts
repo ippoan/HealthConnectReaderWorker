@@ -15,7 +15,7 @@ export interface ZonesListItem {
  */
 export interface WorkoutRow {
   id: string;
-  source: "hc" | "zones" | "ghapi";
+  source: "hc" | "zones" | "ghapi" | "manual";
   date: string;                     // YYYY-MM-DD (UTC)
   start_at: string | null;          // ISO 8601 UTC
   end_at: string | null;            // ISO 8601 UTC
@@ -472,12 +472,158 @@ function hcExerciseName(exerciseType: unknown): string | null {
   return HC_EXERCISE_NAMES[exerciseType] ?? `exercise_${exerciseType}`;
 }
 
+// =============================================================================
+// 手動作成 HC データ (source='manual') — Refs ippoan/HealthConnectReader#6
+//
+// Health Connect から自動取込できなかった (端末故障 / 権限未取得 / ソフトのバグ
+// で上書き消失した) workout を、心拍データを背景に開始/終了/距離/速度から
+// 手で組み立てて保存する。`hc/` key とは別 prefix (`manual/`) + 別 source に
+// 隔離するため、Android の自動 upload が走っても **絶対に上書きされない**。
+// 削除すれば元に戻る (undo)。
+// =============================================================================
+
+/** 手動作成 workout の D1 row を組み立てる入力。 */
+export interface ManualWorkoutInput {
+  startTime: string; // ISO 8601
+  endTime: string; // ISO 8601
+  exerciseType: number;
+  title?: string | null;
+  distanceKm?: number | null;
+}
+
+/**
+ * 手動 workout の安定 id。`manual:<startTime>:<exerciseType>:<title>` の SHA-256
+ * 上位 16 hex を `manual_` で囲む。同じ入力での再保存は同 id = upsert で上書き
+ * (= 微修正が反映される)。`manualKeyFor` の正規表現 `manual_[0-9a-f]{16}` と揃える。
+ */
+export async function manualSessionId(
+  startTime: string,
+  exerciseType: number,
+  title?: string | null,
+): Promise<string> {
+  const seed = `manual:${startTime}:${exerciseType}:${title ?? ""}`;
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(seed),
+  );
+  const view = new Uint8Array(buf);
+  const hex: string[] = [];
+  for (let i = 0; i < 8; i++) hex.push(view[i].toString(16).padStart(2, "0"));
+  return `manual_${hex.join("")}`;
+}
+
+/**
+ * 手動入力を **HC payload 構造** (sessions/distances/speeds) に整形する。
+ * R2 に raw 保存する body。`hcPayloadToRows` が読める形と互換にしてあるので、
+ * 将来 reindex で再展開も効く。`manual: true` フラグで手動由来を明示する。
+ */
+export function buildManualPayload(
+  input: ManualWorkoutInput,
+  collectedAt: string,
+): Record<string, unknown> {
+  const date = sessionDateUtc(input.startTime) ?? input.startTime.slice(0, 10);
+  const src = "manual";
+  const distances =
+    typeof input.distanceKm === "number" && input.distanceKm > 0
+      ? [
+          {
+            startTime: input.startTime,
+            endTime: input.endTime,
+            km: input.distanceKm,
+            source: src,
+          },
+        ]
+      : [];
+  return {
+    date,
+    collectedAt,
+    manual: true,
+    sessions: [
+      {
+        startTime: input.startTime,
+        endTime: input.endTime,
+        exerciseType: input.exerciseType,
+        title: input.title ?? null,
+        source: src,
+      },
+    ],
+    distances,
+    speeds: [],
+  };
+}
+
+/** 手動入力から D1 workouts row を組み立てる。id / rawKey は呼び元が決める。 */
+export function manualInputToRow(
+  input: ManualWorkoutInput,
+  id: string,
+  rawKey: string,
+  uploadedAt: string,
+): WorkoutRow {
+  const date = sessionDateUtc(input.startTime) ?? input.startTime.slice(0, 10);
+  const durationSec = isoDurationSec(input.startTime, input.endTime);
+  const distanceM =
+    typeof input.distanceKm === "number" && input.distanceKm > 0
+      ? Math.round(input.distanceKm * 1000)
+      : null;
+  const title =
+    typeof input.title === "string" && input.title.length > 0
+      ? input.title
+      : hcExerciseName(input.exerciseType);
+  return {
+    id,
+    source: "manual",
+    date,
+    start_at: input.startTime,
+    end_at: input.endTime,
+    activity_name: title,
+    distance_m: distanceM,
+    duration_sec: durationSec,
+    active_calories: null,
+    steps: null,
+    avg_heart_rate: null,
+    min_heart_rate: null,
+    max_heart_rate: null,
+    raw_key: rawKey,
+    uploaded_at: uploadedAt,
+  };
+}
+
+/** workouts から 1 行削除する (= 手動作成の取り消し)。idempotent。 */
+export async function deleteWorkout(
+  db: D1Database,
+  source: "hc" | "zones" | "ghapi" | "manual",
+  id: string,
+): Promise<void> {
+  await db
+    .prepare("DELETE FROM workouts WHERE source = ? AND id = ?")
+    .bind(source, id)
+    .run();
+}
+
+/**
+ * D1 から手動作成 (source='manual') workouts を新しい順に取得する。
+ * `/api/manual` の一覧表示 + 削除 UI 用。
+ */
+export async function listManualFromDb(
+  db: D1Database,
+  limit = 1000,
+): Promise<WorkoutRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT * FROM workouts WHERE source = 'manual'
+        ORDER BY start_at DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all<WorkoutRow>();
+  return result.results ?? [];
+}
+
 /**
  * D1 から HC + Zones の workouts を新しい順に取得。filter は呼び元で。
  */
 export async function listWorkouts(
   db: D1Database,
-  opts: { source?: "hc" | "zones" | "ghapi"; limit?: number } = {},
+  opts: { source?: "hc" | "zones" | "ghapi" | "manual"; limit?: number } = {},
 ): Promise<WorkoutRow[]> {
   const limit = opts.limit ?? 1000;
   const stmt = opts.source
@@ -565,13 +711,15 @@ export type WorkoutMatchItem =
     }
   | { type: "hc_only"; hc: WorkoutRow }
   | { type: "zones_only"; zones: WorkoutRow }
-  | { type: "ghapi_only"; ghapi: WorkoutRow };
+  | { type: "ghapi_only"; ghapi: WorkoutRow }
+  | { type: "manual_only"; manual: WorkoutRow };
 
 export interface WorkoutDay {
   date: string;
   hc_count: number;
   zones_count: number;
   ghapi_count: number;
+  manual_count: number;
   matched_count: number;
   items: WorkoutMatchItem[];
 }
@@ -715,6 +863,7 @@ function startAtOf(it: WorkoutMatchItem): string {
   }
   if (it.type === "hc_only") return it.hc.start_at ?? "";
   if (it.type === "ghapi_only") return it.ghapi.start_at ?? "";
+  if (it.type === "manual_only") return it.manual.start_at ?? "";
   return it.zones.start_at ?? "";
 }
 
@@ -763,6 +912,7 @@ export function groupAndMatch(
   const hcs = rows.filter((r) => r.source === "hc");
   const zones = rows.filter((r) => r.source === "zones");
   const ghapis = rows.filter((r) => r.source === "ghapi");
+  const manuals = rows.filter((r) => r.source === "manual");
   const hcIds = new Set(hcs.map((h) => h.id));
   const zonesIds = new Set(zones.map((z) => z.id));
   const parent = new Map<string, string>();
@@ -924,6 +1074,12 @@ export function groupAndMatch(
     pushTo(rowDate(gh), { type: "ghapi_only", ghapi: gh });
   }
 
+  // manual (手動作成) も突合グラフに乗せず `manual_only` 単独で push する。
+  // hc とは別 source なので auto 突合の二重計上を避ける。Refs HealthConnectReader#6
+  for (const mn of manuals) {
+    pushTo(rowDate(mn), { type: "manual_only", manual: mn });
+  }
+
   // ----- WorkoutDay 配列に成型 -----
   const days: WorkoutDay[] = [];
   for (const [date, items] of itemsByDate) {
@@ -931,7 +1087,7 @@ export function groupAndMatch(
       const ea = startAtOf(a), eb = startAtOf(b);
       return ea < eb ? -1 : ea > eb ? 1 : 0;
     });
-    let hc_count = 0, zones_count = 0, ghapi_count = 0, matched_count = 0;
+    let hc_count = 0, zones_count = 0, ghapi_count = 0, manual_count = 0, matched_count = 0;
     for (const it of items) {
       if (it.type === "matched") {
         hc_count += it.hcs.length;
@@ -939,9 +1095,10 @@ export function groupAndMatch(
         matched_count += 1;
       } else if (it.type === "hc_only") hc_count += 1;
       else if (it.type === "ghapi_only") ghapi_count += 1;
+      else if (it.type === "manual_only") manual_count += 1;
       else zones_count += 1;
     }
-    days.push({ date, hc_count, zones_count, ghapi_count, matched_count, items });
+    days.push({ date, hc_count, zones_count, ghapi_count, manual_count, matched_count, items });
   }
   days.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   return days;
