@@ -1580,6 +1580,11 @@ function authHeaders() {
   } catch (e) {}
   return {};
 }
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = String(s == null ? "" : s);
+  return d.innerHTML;
+}
 function fmtClock(ms) {
   const d = new Date(ms);
   return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
@@ -1614,16 +1619,19 @@ async function load() {
 
   const startMs = row.start_at ? Date.parse(row.start_at) : null;
   const endMs = row.end_at ? Date.parse(row.end_at) : null;
+  // row.* は Google Health 由来の外部データ。innerHTML に入れるため全て esc() /
+  // 数値化してから埋め込む (XSS 対策)。Refs #60
+  const num = function (v) { return v == null ? "—" : esc(Number(v)); };
   summaryEl.innerHTML =
-    '<div class="font-medium">' + (row.activity_name || "—") + "</div>" +
+    '<div class="font-medium">' + esc(row.activity_name || "—") + "</div>" +
     '<div class="text-[12px] text-slate-500">' +
-    (startMs ? fmtClock(startMs) + "–" + fmtClock(endMs) : "") +
-    " · " + ((row.distance_m != null) ? (row.distance_m / 1000).toFixed(2) + " km" : "—") +
-    " · " + fmtDur(row.duration_sec) + "</div>" +
-    '<div class="text-[12px] mt-1">♥ avg ' + (row.avg_heart_rate ?? "—") +
-    " / min " + (row.min_heart_rate ?? "—") +
-    " / max " + (row.max_heart_rate ?? "—") +
-    " (" + samples.length + " samples)</div>";
+    (startMs ? esc(fmtClock(startMs)) + "–" + esc(fmtClock(endMs)) : "") +
+    " · " + ((row.distance_m != null) ? esc((Number(row.distance_m) / 1000).toFixed(2)) + " km" : "—") +
+    " · " + esc(fmtDur(row.duration_sec)) + "</div>" +
+    '<div class="text-[12px] mt-1">♥ avg ' + num(row.avg_heart_rate) +
+    " / min " + num(row.min_heart_rate) +
+    " / max " + num(row.max_heart_rate) +
+    " (" + esc(Number(samples.length)) + " samples)</div>";
 
   if (samples.length === 0) {
     document.getElementById("chart-empty").classList.remove("hidden");
