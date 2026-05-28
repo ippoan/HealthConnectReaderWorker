@@ -206,8 +206,8 @@ export class GhapiSubscriberDO {
    * (= `createSubscription` が stub)、当面はこの手動 backfill が唯一の取込経路。
    *
    * body: `{ days?: number, force?: boolean }` (days は default 30、1〜365 に clamp)。
-   * UTC の暦日ごとに interval を切る (R2 key の `{mm-dd}` が 1 日 1 ファイルに
-   * なるよう `ingestExercisePoints` に 1 日分ずつ渡す)。
+   * JST の暦日ごとに interval を切る (civil_start_time filter が端末ローカル=JST
+   * 暦日なため。R2 key の `{mm-dd}` も JST で 1 日 1 ファイルに揃う)。Refs #85
    *
    * 差分取込: `force` でなく `last_backfill_at` がある場合、その暦日以降だけを
    * 走査する (= 毎回 N 日全件叩き直す無駄を避ける。最後の取込日は再取込されるが
@@ -241,9 +241,9 @@ export class GhapiSubscriberDO {
     const DAY_MS = 86_400_000;
     const lastBackfillAt =
       await this.state.storage.get<number>(K_LAST_BACKFILL_AT);
-    // 走査対象の UTC 暦日 (各日 00:00 UTC) を新しい順に列挙。差分取込なら
+    // 走査対象の JST 暦日 (各日 00:00 JST) を新しい順に列挙。差分取込なら
     // last_backfill_at の暦日以降だけ。Health API の civil_start_time filter は
-    // 暦日単位なので interval は [00:00 UTC, 翌 00:00 UTC) に揃える。
+    // 端末ローカル (JST) 暦日単位なので interval は [00:00 JST, 翌 00:00 JST) に揃える。
     const { dayStarts, incremental } = backfillDayStarts(
       Date.now(),
       days,
