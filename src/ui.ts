@@ -1841,9 +1841,11 @@ function renderSingle(j) {
   // 1 本の平坦線 (start→end で avg km/h) として重ね、速度区間と心拍の同期を見る。
   const hcSessions = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
   const SPEED_COLORS = ["#0284c7", "#7c3aed", "#db2777", "#ea580c", "#16a34a", "#0891b2"];
+  var speedMaxV = 0;
   hcSessions.forEach(function (w, i) {
     if (w.distance_m == null || !w.duration_sec) return;
     const v = (w.distance_m / 1000) / (w.duration_sec / 3600);
+    if (v > speedMaxV) speedMaxV = v;
     const s = w.start_at ? Date.parse(w.start_at) : null;
     const e = w.end_at ? Date.parse(w.end_at) : null;
     if (s == null || e == null) return;
@@ -1857,6 +1859,10 @@ function renderSingle(j) {
       fill: false,
     });
   });
+  // 速度軸を 0 始まり + 上方向に余白 (×1.25, 最低 1) で固定する。速度帯が
+  // 9〜10km/h に密集していても天井に張り付かず、hr 軸固定による多軸グリッド
+  // 整合で 0 始まりが崩れるのも防ぐ。Refs ippoan/HealthConnectReader#6
+  const speedMax = Math.max(1, Math.ceil(speedMaxV * 1.25));
 
   const hrB = hrAxisBounds(samples);
   const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
@@ -1871,7 +1877,7 @@ function renderSingle(j) {
           ticks: { callback: function (v) { return fmtClock(v); }, maxTicksLimit: 8 },
         },
         hr: { type: "linear", position: "right", min: hrB.min, max: hrB.max, title: { display: true, text: "bpm" } },
-        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
+        speed: { type: "linear", position: "left", min: 0, max: speedMax, title: { display: true, text: "km/h" } },
       },
       plugins: {
         legend: { labels: { boxWidth: 12, font: { size: 10 } } },
@@ -1968,6 +1974,7 @@ function renderCompare(jA, jB) {
   }
   // 速度は各 workout の突合 HC session を「塗り速度帯」として重ねる。
   // 実線 + 0 まで塗り (fill)。
+  var speedMaxV = 0;
   const pushSpeed = function (j, start, color, bg, tag) {
     const sess = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
     sess.forEach(function (w) {
@@ -1976,6 +1983,7 @@ function renderCompare(jA, jB) {
       const e = w.end_at ? Date.parse(w.end_at) : null;
       if (s == null || e == null || start == null) return;
       const v = (Number(w.distance_m) / 1000) / (Number(w.duration_sec) / 3600);
+      if (v > speedMaxV) speedMaxV = v;
       datasets.push({
         label: tag + ": " + v.toFixed(1) + "km/h",
         data: [{ x: elapsedMin(s, start), y: v }, { x: elapsedMin(e, start), y: v }],
@@ -1990,6 +1998,8 @@ function renderCompare(jA, jB) {
   const beforeB = datasets.length;
   pushSpeed(jB, startB, "#1d4ed8", "rgba(29,78,216,0.20)", "B");
   for (let k = beforeB; k < datasets.length; k++) bIdx.push(k);
+  // 速度軸を 0 始まり + 余白で固定 (天井張り付き防止)。Refs HealthConnectReader#6
+  const speedMax = Math.max(1, Math.ceil(speedMaxV * 1.25));
 
   // workout 実時間 (HR サンプルが途中までしか無くても軸を伸ばすため)。
   const durA = rowA.duration_sec ? Number(rowA.duration_sec) / 60 : null;
@@ -2018,7 +2028,7 @@ function renderCompare(jA, jB) {
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
         hr: { type: "linear", position: "right", min: hrB.min, max: hrB.max, title: { display: true, text: "bpm" } },
-        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
+        speed: { type: "linear", position: "left", min: 0, max: speedMax, title: { display: true, text: "km/h" } },
       },
       plugins: {
         legend: {
@@ -2344,6 +2354,9 @@ function updateWindow() {
     var endMs2 = startMs + durSec * 1000;
     chart.data.datasets[winDatasetIdx].data = [{ x: startMs, y: v }, { x: endMs2, y: v }];
     chart.data.datasets[winDatasetIdx].label = "ワークアウト窓 " + v.toFixed(1) + "km/h";
+    // 速度軸を 0 始まり + 余白で固定 (窓が天井に張り付かないように)
+    chart.options.scales.speed.min = 0;
+    chart.options.scales.speed.max = Math.max(1, Math.ceil(v * 1.25));
     chart.update("none");
   }
 }
