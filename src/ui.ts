@@ -1555,16 +1555,28 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
 <div class="max-w-3xl mx-auto p-4 space-y-4">
   <header class="flex items-center justify-between pt-2">
     <a href="/" class="text-sm text-emerald-700">‹ 戻る</a>
-    <h1 class="text-lg font-semibold">Google Health 詳細</h1>
+    <h1 id="page-title" class="text-lg font-semibold">Google Health 詳細</h1>
     <span></span>
   </header>
+  <section id="compare-bar" class="bg-white rounded-2xl shadow p-3 text-sm flex flex-wrap items-center gap-2">
+    <label class="text-[12px] text-slate-500">比較相手</label>
+    <select id="compare-select" class="flex-1 min-w-[160px] border border-slate-300 rounded-lg px-2 py-1 text-[12px]">
+      <option value="">読込中…</option>
+    </select>
+    <button id="compare-btn" class="px-3 py-1 rounded-lg bg-emerald-600 text-white text-[12px] font-medium disabled:opacity-40" disabled>比較</button>
+    <a id="compare-clear" class="text-[12px] text-emerald-700 hidden" href="#">比較解除</a>
+  </section>
   <section id="summary" class="bg-white rounded-2xl shadow p-4 text-sm text-slate-700">読込中…</section>
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
-    <h2 class="font-semibold">心拍 + 速度</h2>
-    <p class="text-[10px] text-slate-400">
+    <h2 id="chart-title" class="font-semibold">心拍 + 速度</h2>
+    <p id="chart-help-single" class="text-[10px] text-slate-400">
       赤 = 心拍 (Fitbit, 右軸 bpm)。色帯 = 各 HC session の平均速度 (左軸 km/h) を
       期間で平坦表示。速度区間の境界で心拍が上下するかを確認できる。速度は HC、
       心拍は Fitbit から取得し時間軸で重ねる。心拍は時刻ズレ対策で前後 5 分広げて取得。
+    </p>
+    <p id="chart-help-compare" class="text-[10px] text-slate-400 hidden">
+      横軸 = 各 workout の開始からの経過 (分)。2 件の心拍 (実線, 右軸 bpm) を
+      経過時間で揃えて重ね、波形を比較できる。破線 = 各 workout の平均速度 (左軸 km/h)。
     </p>
     <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
     <canvas id="hr-chart" height="220"></canvas>
@@ -1577,6 +1589,7 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
 <script>
 const params = new URLSearchParams(location.search);
 const id = params.get("id") || "";
+const id2 = params.get("id2") || "";
 function authHeaders() {
   try {
     if (window.HC && typeof window.HC.getUploadToken === "function") {
@@ -1595,23 +1608,70 @@ function fmtClock(ms) {
   const d = new Date(ms);
   return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 }
+function fmtDate(ms) {
+  const d = new Date(ms);
+  return String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
 function fmtDur(sec) {
   if (sec == null) return "—";
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
   return (h > 0 ? h + "h " : "") + m + "m";
 }
-async function load() {
-  const summaryEl = document.getElementById("summary");
-  if (!id) { summaryEl.textContent = "id がありません"; return; }
-  let j;
-  try {
-    const r = await fetch("/api/ghapi/workout?id=" + encodeURIComponent(id), {
-      credentials: "include", headers: authHeaders(),
-    });
-    if (!r.ok) { summaryEl.textContent = "取得失敗 (" + r.status + ")"; return; }
-    j = await r.json();
-  } catch (e) { summaryEl.textContent = "取得エラー: " + e; return; }
+function num(v) { return v == null ? "—" : esc(Number(v)); }
+function avgKmh(row) {
+  if (row.distance_m == null || !row.duration_sec) return null;
+  return (Number(row.distance_m) / 1000) / (Number(row.duration_sec) / 3600);
+}
+async function fetchWorkout(wid) {
+  const r = await fetch("/api/ghapi/workout?id=" + encodeURIComponent(wid), {
+    credentials: "include", headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error("status " + r.status);
+  return await r.json();
+}
 
+// 比較相手 picker: 直近の ghapi workout を列挙して select に流す。
+async function populateCompare() {
+  const sel = document.getElementById("compare-select");
+  const btn = document.getElementById("compare-btn");
+  try {
+    const r = await fetch("/api/workouts?days=90", { credentials: "include", headers: authHeaders() });
+    if (!r.ok) throw new Error("status " + r.status);
+    const j = await r.json();
+    const opts = [];
+    (j.days || []).forEach(function (day) {
+      (day.items || []).forEach(function (it) {
+        if (it.type !== "ghapi_only" || !it.ghapi) return;
+        const g = it.ghapi;
+        if (g.id === id) return; // 自分自身は除外
+        const ms = g.start_at ? Date.parse(g.start_at) : null;
+        const label = (ms ? fmtDate(ms) + " " + fmtClock(ms) + " " : "") +
+          (g.activity_name || "workout") +
+          (g.distance_m != null ? " " + (Number(g.distance_m) / 1000).toFixed(1) + "km" : "");
+        opts.push({ id: g.id, label: label });
+      });
+    });
+    sel.innerHTML = '<option value="">— 選択 —</option>' +
+      opts.map(function (o) {
+        const selAttr = o.id === id2 ? " selected" : "";
+        return '<option value="' + esc(o.id) + '"' + selAttr + ">" + esc(o.label) + "</option>";
+      }).join("");
+    btn.disabled = !sel.value;
+    sel.addEventListener("change", function () { btn.disabled = !sel.value; });
+    btn.addEventListener("click", function () {
+      if (!sel.value) return;
+      const p = new URLSearchParams();
+      p.set("id", id);
+      p.set("id2", sel.value);
+      location.search = p.toString();
+    });
+  } catch (e) {
+    sel.innerHTML = '<option value="">一覧取得失敗</option>';
+  }
+}
+
+function renderSingle(j) {
+  const summaryEl = document.getElementById("summary");
   const row = j.row || {};
   const samples = Array.isArray(j.samples) ? j.samples : [];
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
@@ -1620,7 +1680,6 @@ async function load() {
   const endMs = row.end_at ? Date.parse(row.end_at) : null;
   // row.* は Google Health 由来の外部データ。innerHTML に入れるため全て esc() /
   // 数値化してから埋め込む (XSS 対策)。Refs #60
-  const num = function (v) { return v == null ? "—" : esc(Number(v)); };
   summaryEl.innerHTML =
     '<div class="font-medium">' + esc(row.activity_name || "—") + "</div>" +
     '<div class="text-[12px] text-slate-500">' +
@@ -1700,6 +1759,135 @@ async function load() {
       },
     },
   });
+}
+
+// 2 件の workout を「開始からの経過 (分)」で揃えて重ねる比較ビュー。
+function renderCompare(jA, jB) {
+  document.getElementById("page-title").textContent = "Google Health 比較";
+  document.getElementById("chart-title").textContent = "心拍 比較";
+  document.getElementById("chart-help-single").classList.add("hidden");
+  document.getElementById("chart-help-compare").classList.remove("hidden");
+  const clear = document.getElementById("compare-clear");
+  clear.classList.remove("hidden");
+  clear.href = "/ghapi/workout?id=" + encodeURIComponent(id);
+
+  const rowA = jA.row || {}, rowB = jB.row || {};
+  const samplesA = Array.isArray(jA.samples) ? jA.samples : [];
+  const samplesB = Array.isArray(jB.samples) ? jB.samples : [];
+  document.getElementById("raw-dump").textContent = JSON.stringify({ A: jA, B: jB }, null, 2);
+
+  const startA = rowA.start_at ? Date.parse(rowA.start_at) : null;
+  const startB = rowB.start_at ? Date.parse(rowB.start_at) : null;
+  const kmhA = avgKmh(rowA), kmhB = avgKmh(rowB);
+  const cell = function (label, va, vb) {
+    return "<tr><td class=\\"py-1 pr-2 text-slate-500\\">" + label + "</td>" +
+      "<td class=\\"py-1 pr-2 font-medium text-rose-600\\">" + va + "</td>" +
+      "<td class=\\"py-1 font-medium text-sky-600\\">" + vb + "</td></tr>";
+  };
+  document.getElementById("summary").innerHTML =
+    '<table class="w-full text-[12px] border-collapse">' +
+    "<thead><tr><th></th>" +
+    '<th class="text-left text-rose-600">A</th>' +
+    '<th class="text-left text-sky-600">B</th></tr></thead><tbody>' +
+    cell("種目", esc(rowA.activity_name || "—"), esc(rowB.activity_name || "—")) +
+    cell("日付", startA ? esc(fmtDate(startA)) : "—", startB ? esc(fmtDate(startB)) : "—") +
+    cell("時刻", startA ? esc(fmtClock(startA)) : "—", startB ? esc(fmtClock(startB)) : "—") +
+    cell("距離",
+      rowA.distance_m != null ? esc((Number(rowA.distance_m) / 1000).toFixed(2)) + " km" : "—",
+      rowB.distance_m != null ? esc((Number(rowB.distance_m) / 1000).toFixed(2)) + " km" : "—") +
+    cell("時間", esc(fmtDur(rowA.duration_sec)), esc(fmtDur(rowB.duration_sec))) +
+    cell("平均速度",
+      kmhA != null ? esc(kmhA.toFixed(1)) + " km/h" : "—",
+      kmhB != null ? esc(kmhB.toFixed(1)) + " km/h" : "—") +
+    cell("♥ avg", num(rowA.avg_heart_rate), num(rowB.avg_heart_rate)) +
+    cell("♥ min", num(rowA.min_heart_rate), num(rowB.min_heart_rate)) +
+    cell("♥ max", num(rowA.max_heart_rate), num(rowB.max_heart_rate)) +
+    cell("samples", esc(Number(samplesA.length)), esc(Number(samplesB.length))) +
+    "</tbody></table>";
+
+  if (samplesA.length === 0 && samplesB.length === 0) {
+    document.getElementById("chart-empty").classList.remove("hidden");
+    return;
+  }
+
+  const datasets = [];
+  const elapsedMin = function (t, start) { return (t - start) / 60000; };
+  if (startA != null && samplesA.length) {
+    datasets.push({
+      label: "A: 心拍",
+      data: samplesA.map(function (s) { return { x: elapsedMin(s.t, startA), y: s.bpm }; }),
+      yAxisID: "hr", borderColor: "#e11d48", borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false,
+    });
+  }
+  if (startB != null && samplesB.length) {
+    datasets.push({
+      label: "B: 心拍",
+      data: samplesB.map(function (s) { return { x: elapsedMin(s.t, startB), y: s.bpm }; }),
+      yAxisID: "hr", borderColor: "#0284c7", borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false,
+    });
+  }
+  if (kmhA != null && rowA.duration_sec) {
+    datasets.push({
+      label: "A: " + kmhA.toFixed(1) + "km/h",
+      data: [{ x: 0, y: kmhA }, { x: Number(rowA.duration_sec) / 60, y: kmhA }],
+      yAxisID: "speed", borderColor: "#fb7185", borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false,
+    });
+  }
+  if (kmhB != null && rowB.duration_sec) {
+    datasets.push({
+      label: "B: " + kmhB.toFixed(1) + "km/h",
+      data: [{ x: 0, y: kmhB }, { x: Number(rowB.duration_sec) / 60, y: kmhB }],
+      yAxisID: "speed", borderColor: "#38bdf8", borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false,
+    });
+  }
+
+  new Chart(document.getElementById("hr-chart").getContext("2d"), {
+    type: "line",
+    data: { datasets: datasets },
+    options: {
+      responsive: true,
+      interaction: { intersect: false, mode: "index" },
+      scales: {
+        x: {
+          type: "linear",
+          title: { display: true, text: "経過 (分)" },
+          ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
+        },
+        hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
+        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
+      },
+      plugins: {
+        legend: { labels: { boxWidth: 12, font: { size: 10 } } },
+        tooltip: {
+          callbacks: {
+            title: function (items) {
+              if (!items || !items.length) return "";
+              return Math.round(items[0].parsed.x) + "分";
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+async function load() {
+  const summaryEl = document.getElementById("summary");
+  if (!id) { summaryEl.textContent = "id がありません"; return; }
+  populateCompare();
+  if (id2) {
+    let jA, jB;
+    try {
+      [jA, jB] = await Promise.all([fetchWorkout(id), fetchWorkout(id2)]);
+    } catch (e) { summaryEl.textContent = "取得エラー: " + e; return; }
+    renderCompare(jA, jB);
+    return;
+  }
+  let j;
+  try {
+    j = await fetchWorkout(id);
+  } catch (e) { summaryEl.textContent = "取得失敗: " + e; return; }
+  renderSingle(j);
 }
 load();
 </script>
