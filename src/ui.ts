@@ -1579,6 +1579,14 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
       経過時間で揃えて重ね、波形を比較できる。破線 = 各 workout の平均速度 (左軸 km/h)。
     </p>
     <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
+    <div id="offset-ctrl" class="hidden items-center gap-2 text-[12px] pt-1">
+      <span class="text-sky-600 font-medium shrink-0">B をずらす</span>
+      <button id="offset-minus" type="button" class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">−</button>
+      <input id="offset-range" type="range" min="-30" max="30" step="0.5" value="0" class="flex-1 min-w-[120px] accent-sky-600" />
+      <button id="offset-plus" type="button" class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">＋</button>
+      <span id="offset-val" class="tabular-nums w-14 text-right text-slate-500 shrink-0">0.0 分</span>
+      <button id="offset-reset" type="button" class="px-2 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0">リセット</button>
+    </div>
     <canvas id="hr-chart" height="220"></canvas>
   </section>
   <details class="bg-white rounded-2xl shadow p-4">
@@ -1618,9 +1626,15 @@ function fmtDur(sec) {
   return (h > 0 ? h + "h " : "") + m + "m";
 }
 function num(v) { return v == null ? "—" : esc(Number(v)); }
-function avgKmh(row) {
-  if (row.distance_m == null || !row.duration_sec) return null;
-  return (Number(row.distance_m) / 1000) / (Number(row.duration_sec) / 3600);
+// 突合した HC session 群の合算距離 / 合算時間から平均速度 (km/h) を出す。
+function hcAvgKmh(j) {
+  const sess = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
+  let dist = 0, dur = 0;
+  sess.forEach(function (w) {
+    if (w.distance_m != null && w.duration_sec) { dist += Number(w.distance_m); dur += Number(w.duration_sec); }
+  });
+  if (!dur) return null;
+  return (dist / 1000) / (dur / 3600);
 }
 async function fetchWorkout(wid) {
   const r = await fetch("/api/ghapi/workout?id=" + encodeURIComponent(wid), {
@@ -1778,7 +1792,9 @@ function renderCompare(jA, jB) {
 
   const startA = rowA.start_at ? Date.parse(rowA.start_at) : null;
   const startB = rowB.start_at ? Date.parse(rowB.start_at) : null;
-  const kmhA = avgKmh(rowA), kmhB = avgKmh(rowB);
+  // 速度は突合済み HC session (de-doubled distance) の合算 avg を採る。
+  // ghapi row の distance/duration ではなく単一ビューと同じ HC 由来に揃える。
+  const kmhA = hcAvgKmh(jA), kmhB = hcAvgKmh(jB);
   const cell = function (label, va, vb) {
     return "<tr><td class=\\"py-1 pr-2 text-slate-500\\">" + label + "</td>" +
       "<td class=\\"py-1 pr-2 font-medium text-rose-600\\">" + va + "</td>" +
@@ -1811,6 +1827,8 @@ function renderCompare(jA, jB) {
   }
 
   const datasets = [];
+  // B 側の dataset index を覚えておき、offset スライダーで横ずらしする。
+  const bIdx = [];
   const elapsedMin = function (t, start) { return (t - start) / 60000; };
   if (startA != null && samplesA.length) {
     datasets.push({
@@ -1825,23 +1843,31 @@ function renderCompare(jA, jB) {
       data: samplesB.map(function (s) { return { x: elapsedMin(s.t, startB), y: s.bpm }; }),
       yAxisID: "hr", borderColor: "#0284c7", borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false,
     });
+    bIdx.push(datasets.length - 1);
   }
-  if (kmhA != null && rowA.duration_sec) {
-    datasets.push({
-      label: "A: " + kmhA.toFixed(1) + "km/h",
-      data: [{ x: 0, y: kmhA }, { x: Number(rowA.duration_sec) / 60, y: kmhA }],
-      yAxisID: "speed", borderColor: "#fb7185", borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false,
+  // 速度は各 workout の突合 HC session を平坦線で重ねる (単一ビューと同じ流儀)。
+  const pushSpeed = function (j, start, color, tag) {
+    const sess = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
+    sess.forEach(function (w) {
+      if (w.distance_m == null || !w.duration_sec) return;
+      const s = w.start_at ? Date.parse(w.start_at) : null;
+      const e = w.end_at ? Date.parse(w.end_at) : null;
+      if (s == null || e == null || start == null) return;
+      const v = (Number(w.distance_m) / 1000) / (Number(w.duration_sec) / 3600);
+      datasets.push({
+        label: tag + ": " + v.toFixed(1) + "km/h",
+        data: [{ x: elapsedMin(s, start), y: v }, { x: elapsedMin(e, start), y: v }],
+        yAxisID: "speed", borderColor: color, borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false,
+      });
+      return datasets.length - 1;
     });
-  }
-  if (kmhB != null && rowB.duration_sec) {
-    datasets.push({
-      label: "B: " + kmhB.toFixed(1) + "km/h",
-      data: [{ x: 0, y: kmhB }, { x: Number(rowB.duration_sec) / 60, y: kmhB }],
-      yAxisID: "speed", borderColor: "#38bdf8", borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false,
-    });
-  }
+  };
+  pushSpeed(jA, startA, "#fb7185", "A");
+  const beforeB = datasets.length;
+  pushSpeed(jB, startB, "#38bdf8", "B");
+  for (let k = beforeB; k < datasets.length; k++) bIdx.push(k);
 
-  new Chart(document.getElementById("hr-chart").getContext("2d"), {
+  const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",
     data: { datasets: datasets },
     options: {
@@ -1869,6 +1895,39 @@ function renderCompare(jA, jB) {
       },
     },
   });
+
+  setupOffset(chart, bIdx);
+}
+
+// B 系列 (心拍 + 速度線) を時間軸方向に前後へずらすスライダー。
+// A と山が揃うよう手動補正する用途。元の x を保持して都度再計算する。
+function setupOffset(chart, bIdx) {
+  if (!bIdx.length) return;
+  const ctrl = document.getElementById("offset-ctrl");
+  const range = document.getElementById("offset-range");
+  const valEl = document.getElementById("offset-val");
+  ctrl.classList.remove("hidden");
+  ctrl.classList.add("flex");
+  // 各 B dataset の元 x を退避。
+  bIdx.forEach(function (di) {
+    chart.data.datasets[di].data.forEach(function (pt) { pt._x0 = pt.x; });
+  });
+  const apply = function (off) {
+    const o = Number(off) || 0;
+    valEl.textContent = (o > 0 ? "+" : "") + o.toFixed(1) + " 分";
+    bIdx.forEach(function (di) {
+      chart.data.datasets[di].data.forEach(function (pt) { pt.x = pt._x0 + o; });
+    });
+    chart.update("none");
+  };
+  range.addEventListener("input", function () { apply(range.value); });
+  const step = function (d) {
+    range.value = String(Math.min(Number(range.max), Math.max(Number(range.min), Number(range.value) + d)));
+    apply(range.value);
+  };
+  document.getElementById("offset-minus").addEventListener("click", function () { step(-0.5); });
+  document.getElementById("offset-plus").addEventListener("click", function () { step(0.5); });
+  document.getElementById("offset-reset").addEventListener("click", function () { range.value = "0"; apply(0); });
 }
 
 async function load() {
