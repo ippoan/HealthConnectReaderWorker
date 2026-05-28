@@ -17,6 +17,21 @@ export const GHAPI_TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const GHAPI_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 export const GHAPI_DATA_BASE = "https://health.googleapis.com/v4";
 
+/**
+ * JST (Asia/Tokyo) の UTC offset (ms)。DST 無しの固定 +09:00。
+ *
+ * Google Health の `civil_start_time` は端末ローカル時刻 (= JST) の暦日なので、
+ * backfill の暦日境界も civil 日付 filter も JST で揃える必要がある。UTC で
+ * 計算すると JST と最大 1 日ズレ、JST 朝〜日中の backfill で当日 (JST) 分が
+ * range から落ちて「昨日までしか取れない」状態になる。Refs #85
+ */
+export const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+/** epoch ms を JST 暦日 (`YYYY-MM-DD`) に変換する。 */
+export function jstDateString(ms: number): string {
+  return new Date(ms + JST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 export interface GhapiWebhookPayload {
   data?: {
     healthUserId?: string;
@@ -124,9 +139,10 @@ export async function revokeToken(
  * filter は civil 日付で範囲指定する (AIP-160):
  *   `exercise.interval.civil_start_time >= "2026-05-01" AND
  *    exercise.interval.civil_start_time < "2026-05-02"`
- * 各 interval の startTimeMillis / endTimeMillis を UTC 暦日に丸めて使う
- * (backfill は UTC midnight 境界で 1 日ずつ渡す前提)。nextPageToken を辿って
- * 全 page 取得する (pageSize 上限 10000)。
+ * `civil_start_time` は端末ローカル時刻 (= JST) の暦日なので、各 interval の
+ * startTimeMillis / endTimeMillis は **JST 暦日**に丸めて使う (backfill は JST
+ * midnight 境界で 1 日ずつ渡す前提)。UTC で丸めると JST と最大 1 日ズレて当日分が
+ * range から落ちる。nextPageToken を辿って全 page 取得する。Refs #85
  *
  * scope: `googlehealth.activity_and_fitness(.readonly)` が必要。
  */
@@ -137,8 +153,8 @@ export async function listExercisePoints(
 ): Promise<GhapiDataPoint[]> {
   const out: GhapiDataPoint[] = [];
   for (const iv of intervals) {
-    const startDate = new Date(iv.startTimeMillis).toISOString().slice(0, 10);
-    const endDate = new Date(iv.endTimeMillis).toISOString().slice(0, 10);
+    const startDate = jstDateString(iv.startTimeMillis);
+    const endDate = jstDateString(iv.endTimeMillis);
     const filter =
       `exercise.interval.civil_start_time >= "${startDate}" AND ` +
       `exercise.interval.civil_start_time < "${endDate}"`;

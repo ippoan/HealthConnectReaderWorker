@@ -4,7 +4,7 @@
  * webhook 駆動 (`GhapiSubscriberDO.onWebhook`) と polling backfill
  * (`GhapiSubscriberDO.handleBackfill`) の両方から呼ばれる共通処理:
  *
- *   1. R2 PUT: `ghapi/{dataType}/{yyyy}/{mm-dd}.json` (intervals[0] の UTC 日付基準)
+ *   1. R2 PUT: `ghapi/{dataType}/{yyyy}/{mm-dd}.json` (intervals[0] の JST 日付基準)
  *   2. D1 upsert: Exercise dataType のみ `ghapiExercisePointToRow` で正規化して upsert
  *
  * DO 状態に依存しない純関数として切り出すことで、R2/D1 binding だけ渡せば
@@ -13,7 +13,7 @@
  * Refs ippoan/HealthConnectReaderWorker#60
  */
 
-import type { GhapiDataPoint } from "./ghapi";
+import { JST_OFFSET_MS, type GhapiDataPoint } from "./ghapi";
 import { ghapiExercisePointToRow, upsertWorkout, type WorkoutRow } from "./db";
 
 export interface GhapiInterval {
@@ -40,8 +40,17 @@ export function hrSeriesKey(id: string): string {
   return `ghapi/hr/${id}.json`;
 }
 
+/** epoch ms を JST 暦日の 00:00 (= JST midnight) の epoch ms に丸める。 */
+function jstMidnight(ms: number): number {
+  return Math.floor((ms + JST_OFFSET_MS) / DAY_MS) * DAY_MS - JST_OFFSET_MS;
+}
+
 /**
- * backfill で走査する UTC 暦日 (各日の 00:00 UTC の epoch ms) を新しい順に列挙する。
+ * backfill で走査する JST 暦日 (各日の 00:00 JST の epoch ms) を新しい順に列挙する。
+ *
+ * Google Health の `civil_start_time` は端末ローカル時刻 (= JST) の暦日なので、
+ * 走査境界も JST で揃える。UTC で丸めると JST と最大 1 日ズレ、JST 朝〜日中の
+ * backfill で当日 (JST) 分が range から落ちる。Refs #85
  *
  * - `force` または `lastBackfillAt` 無し → 過去 `days` 日 (今日含む) 全件
  * - それ以外 (差分取込) → `lastBackfillAt` の暦日以降だけ。ただし N 日 window の
@@ -56,7 +65,7 @@ export function backfillDayStarts(
   force: boolean,
 ): { dayStarts: number[]; incremental: boolean } {
   const clampedDays = Math.max(1, Math.min(365, Math.floor(days)));
-  const todayMidnight = Math.floor(now / DAY_MS) * DAY_MS;
+  const todayMidnight = jstMidnight(now);
   let oldestMidnight = todayMidnight - (clampedDays - 1) * DAY_MS;
   let incremental = false;
   if (
@@ -64,7 +73,7 @@ export function backfillDayStarts(
     typeof lastBackfillAt === "number" &&
     Number.isFinite(lastBackfillAt)
   ) {
-    const lastMidnight = Math.floor(lastBackfillAt / DAY_MS) * DAY_MS;
+    const lastMidnight = jstMidnight(lastBackfillAt);
     if (lastMidnight > oldestMidnight) {
       oldestMidnight = lastMidnight;
       incremental = true;
@@ -79,8 +88,9 @@ export function backfillDayStarts(
 
 /**
  * 1 つの dataType + intervals の data points を R2/D1 に取り込む。
- * R2 key は `intervals[0]` の UTC 日付で決まるため、呼び出し側は **1 日分ずつ**
- * 渡すこと (日跨ぎ点が同一ファイルに混ざるのを避ける)。
+ * R2 key は `intervals[0]` の JST 日付で決まるため、呼び出し側は **1 日分ずつ**
+ * 渡すこと (日跨ぎ点が同一ファイルに混ざるのを避ける)。civil_start_time filter /
+ * 表示層の JST グルーピングと暦日を揃えるため UTC ではなく JST 基準。Refs #85
  */
 export async function ingestExercisePoints(
   r2: R2Bucket,
@@ -93,7 +103,7 @@ export async function ingestExercisePoints(
     return { rawKey: "", fetched: points.length, indexed: 0, rows: [] };
   }
 
-  const firstStart = new Date(intervals[0]!.startTimeMillis);
+  const firstStart = new Date(intervals[0]!.startTimeMillis + JST_OFFSET_MS);
   const yyyy = String(firstStart.getUTCFullYear()).padStart(4, "0");
   const mm = String(firstStart.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(firstStart.getUTCDate()).padStart(2, "0");

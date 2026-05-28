@@ -2268,35 +2268,71 @@ describe("ghapi (Google Health API)", () => {
     ).rejects.toThrow(/ghapi_hr_list_failed:403/);
   });
 
+  it("listExercisePoints filters civil_start_time by JST calendar day (Refs #85)", async () => {
+    const { listExercisePoints } = await import("../src/ghapi");
+    // JST 2026-05-28 の 1 日分: [00:00 JST, 翌 00:00 JST) = [UTC 05-27 15:00, 05-28 15:00)
+    const jstMidnight = Date.UTC(2026, 4, 28) - 9 * 60 * 60 * 1000;
+    const DAY_MS = 86_400_000;
+    let capturedFilter = "";
+    const fetchImpl = (async (url: string) => {
+      capturedFilter = new URL(url).searchParams.get("filter") ?? "";
+      return new Response(JSON.stringify({ dataPoints: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    await listExercisePoints(
+      "tok",
+      [{ startTimeMillis: jstMidnight, endTimeMillis: jstMidnight + DAY_MS }],
+      fetchImpl,
+    );
+    // UTC 基準だと 05-27/05-28 になり当日が落ちる。JST 基準なら 05-28/05-29。
+    expect(capturedFilter).toBe(
+      'exercise.interval.civil_start_time >= "2026-05-28" AND ' +
+        'exercise.interval.civil_start_time < "2026-05-29"',
+    );
+  });
+
   it("GET /api/ghapi/workout 400 without id, 401/404 with id", async () => {
     const r1 = await app.request("/api/ghapi/workout", {}, env);
     expect([400, 401]).toContain(r1.status);
   });
 
+  // dayStarts は JST 暦日の 00:00 (JST midnight) を epoch ms で返す (Refs #85)。
+  // JST 00:00 = UTC 前日 15:00 なので Date.UTC(...) から JST offset (9h) を引く。
+  const jstMid = (y: number, m: number, d: number) =>
+    Date.UTC(y, m, d) - 9 * 60 * 60 * 1000;
+
   it("backfillDayStarts: full N-day window when no last_backfill_at", async () => {
     const { backfillDayStarts } = await import("../src/ghapi-ingest");
-    const now = Date.UTC(2026, 4, 28, 10, 0, 0); // 2026-05-28 10:00 UTC
+    const now = Date.UTC(2026, 4, 28, 10, 0, 0); // 2026-05-28 19:00 JST
     const { dayStarts, incremental } = backfillDayStarts(now, 7, null, false);
     expect(incremental).toBe(false);
     expect(dayStarts.length).toBe(7);
-    // newest first = today midnight
-    expect(dayStarts[0]).toBe(Date.UTC(2026, 4, 28));
-    expect(dayStarts[6]).toBe(Date.UTC(2026, 4, 22));
+    // newest first = JST today midnight
+    expect(dayStarts[0]).toBe(jstMid(2026, 4, 28));
+    expect(dayStarts[6]).toBe(jstMid(2026, 4, 22));
+  });
+
+  it("backfillDayStarts: JST morning still includes JST-today (Refs #85)", async () => {
+    const { backfillDayStarts } = await import("../src/ghapi-ingest");
+    // JST 2026-05-28 06:00 = UTC 2026-05-27 21:00。UTC 基準だと today=05-27 で
+    // JST 今日 (05-28) が落ちる回帰。JST 基準なら最新日は 05-28。
+    const now = Date.UTC(2026, 4, 27, 21, 0, 0);
+    const { dayStarts } = backfillDayStarts(now, 7, null, false);
+    expect(dayStarts[0]).toBe(jstMid(2026, 4, 28));
+    expect(dayStarts[6]).toBe(jstMid(2026, 4, 22));
   });
 
   it("backfillDayStarts: incremental scans only since last_backfill_at day", async () => {
     const { backfillDayStarts } = await import("../src/ghapi-ingest");
-    const now = Date.UTC(2026, 4, 28, 10, 0, 0);
-    // 最終取込が 2 日前 (2026-05-26 18:00 UTC)
+    const now = Date.UTC(2026, 4, 28, 10, 0, 0); // 2026-05-28 19:00 JST
+    // 最終取込が JST 2026-05-27 03:00 (= UTC 2026-05-26 18:00)
     const last = Date.UTC(2026, 4, 26, 18, 0, 0);
     const { dayStarts, incremental } = backfillDayStarts(now, 30, last, false);
     expect(incremental).toBe(true);
-    // 05-26, 05-27, 05-28 の 3 日だけ (last の暦日含む)
-    expect(dayStarts).toEqual([
-      Date.UTC(2026, 4, 28),
-      Date.UTC(2026, 4, 27),
-      Date.UTC(2026, 4, 26),
-    ]);
+    // JST 05-27, 05-28 の 2 日だけ (last の JST 暦日含む)
+    expect(dayStarts).toEqual([jstMid(2026, 4, 28), jstMid(2026, 4, 27)]);
   });
 
   it("backfillDayStarts: force ignores last_backfill_at (full window)", async () => {
