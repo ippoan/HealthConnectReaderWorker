@@ -171,8 +171,9 @@ export const INDEX_HTML = `<!doctype html>
     <div id="ghapi-backfill-row" class="flex gap-2 items-center hidden">
       <select id="ghapi-backfill-days"
         class="text-sm border border-slate-300 rounded-lg px-2 py-2 bg-white">
+        <option value="3" selected>過去 3 日</option>
         <option value="7">過去 1 週間</option>
-        <option value="30" selected>過去 1 か月</option>
+        <option value="30">過去 1 か月</option>
         <option value="90">過去 3 か月</option>
         <option value="180">過去 6 か月</option>
         <option value="365">過去 1 年</option>
@@ -737,7 +738,7 @@ async function ghapiBackfill() {
   const statusEl = $("ghapi-backfill-status");
   const daysSel = $("ghapi-backfill-days");
   const force = $("ghapi-backfill-force").checked;
-  const days = Number(daysSel.value) || 30;
+  const days = Number(daysSel.value) || 3;
   btn.disabled = true;
   statusEl.textContent = force
     ? "取込中… (過去 " + days + " 日 強制全件)"
