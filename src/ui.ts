@@ -1922,17 +1922,18 @@ function renderCompare(jA, jB) {
   pushSpeed(jB, startB, "#38bdf8", "B");
   for (let k = beforeB; k < datasets.length; k++) bIdx.push(k);
 
-  // x 軸の範囲を「長い方の workout 全体」に固定する。HR サンプルが workout 途中
-  // までしか無い場合でも、各 workout の実時間 (duration) と全系列の端点まで軸を
-  // 伸ばし、心拍が短くても速度区間や経過後半が切れないようにする。
-  const xCandMax = [], xCandMin = [0];
-  if (rowA.duration_sec) xCandMax.push(Number(rowA.duration_sec) / 60);
-  if (rowB.duration_sec) xCandMax.push(Number(rowB.duration_sec) / 60);
+  // workout 実時間 (HR サンプルが途中までしか無くても軸を伸ばすため)。
+  const durA = rowA.duration_sec ? Number(rowA.duration_sec) / 60 : null;
+  const durB = rowB.duration_sec ? Number(rowB.duration_sec) / 60 : null;
+  // 現在の B オフセット (refitX が B の duration 端を補正するのに使う)。
+  const state = { offset: 0 };
+  // スライダー可動域用の全幅 (表示状態に依らず固定)。
+  const sCandMax = [durA || 0, durB || 0], sCandMin = [0];
   datasets.forEach(function (ds) {
-    ds.data.forEach(function (p) { xCandMax.push(p.x); xCandMin.push(p.x); });
+    ds.data.forEach(function (p) { sCandMax.push(p.x); sCandMin.push(p.x); });
   });
-  const xMax = Math.max.apply(null, xCandMax);
-  const xMin = Math.min.apply(null, xCandMin);
+  const sliderMax = Math.max.apply(null, sCandMax);
+  const sliderMin = Math.min.apply(null, sCandMin);
 
   const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",
@@ -1943,7 +1944,6 @@ function renderCompare(jA, jB) {
       scales: {
         x: {
           type: "linear",
-          min: xMin, max: xMax,
           title: { display: true, text: "経過 (分)" },
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
@@ -1951,7 +1951,15 @@ function renderCompare(jA, jB) {
         speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
       },
       plugins: {
-        legend: { labels: { boxWidth: 12, font: { size: 10 } } },
+        legend: {
+          labels: { boxWidth: 12, font: { size: 10 } },
+          // 非表示にした系列を軸計算から外すため、トグル後に x 軸を引き直す。
+          onClick: function (e, item, legend) {
+            Chart.defaults.plugins.legend.onClick.call(this, e, item, legend);
+            refitX();
+            legend.chart.update();
+          },
+        },
         tooltip: {
           callbacks: {
             title: function (items) {
@@ -1964,7 +1972,30 @@ function renderCompare(jA, jB) {
     },
   });
 
-  setupOffset(chart, bIdx, xMin, xMax);
+  // 表示中の系列だけで x 軸の min/max を引き直す。非表示系列・隠れた side の
+  // duration は範囲に含めない。B 側は現在のオフセットを考慮する。
+  function refitX() {
+    let lo = Infinity, hi = -Infinity, aVis = false, bVis = false;
+    chart.data.datasets.forEach(function (ds, i) {
+      if (!chart.isDatasetVisible(i)) return;
+      const side = ds.label.indexOf("A:") === 0 ? "A" : (ds.label.indexOf("B:") === 0 ? "B" : null);
+      if (side === "A") aVis = true;
+      if (side === "B") bVis = true;
+      ds.data.forEach(function (p) { if (p.x < lo) lo = p.x; if (p.x > hi) hi = p.x; });
+    });
+    if (aVis) { if (lo > 0) lo = 0; if (durA != null && durA > hi) hi = durA; }
+    if (bVis) {
+      if (state.offset < lo) lo = state.offset;
+      if (durB != null && state.offset + durB > hi) hi = state.offset + durB;
+    }
+    if (!isFinite(lo) || lo > hi) { lo = 0; hi = 1; }
+    chart.options.scales.x.min = lo;
+    chart.options.scales.x.max = hi;
+  }
+  refitX();
+  chart.update("none");
+
+  setupOffset(chart, bIdx, sliderMin, sliderMax, function (o) { state.offset = o; refitX(); });
   setupExport(chart, {
     filename: "ghapi-compare-" + (rowA.id || id) + "-vs-" + (rowB.id || id2) + ".json",
     xAxis: "elapsed_minutes",
@@ -1978,7 +2009,7 @@ function renderCompare(jA, jB) {
 
 // B 系列 (心拍 + 速度線) を時間軸方向に前後へずらすスライダー。
 // A と山が揃うよう手動補正する用途。元の x を保持して都度再計算する。
-function setupOffset(chart, bIdx, xMin, xMax) {
+function setupOffset(chart, bIdx, sliderMin, sliderMax, onApply) {
   if (!bIdx.length) return;
   const ctrl = document.getElementById("offset-ctrl");
   const range = document.getElementById("offset-range");
@@ -1987,8 +2018,8 @@ function setupOffset(chart, bIdx, xMin, xMax) {
   ctrl.classList.add("flex");
   // スライダーの可動域をチャート全幅に合わせる (±30 固定だと長い workout の
   // 後半まで B を寄せられない)。
-  range.min = String(Math.floor(xMin));
-  range.max = String(Math.ceil(xMax));
+  range.min = String(Math.floor(sliderMin));
+  range.max = String(Math.ceil(sliderMax));
   // 各 B dataset の元 x を退避。
   bIdx.forEach(function (di) {
     chart.data.datasets[di].data.forEach(function (pt) { pt._x0 = pt.x; });
@@ -1996,17 +2027,11 @@ function setupOffset(chart, bIdx, xMin, xMax) {
   const apply = function (off) {
     const o = Number(off) || 0;
     valEl.textContent = (o > 0 ? "+" : "") + o.toFixed(1) + " 分";
-    let lo = xMin, hi = xMax;
     bIdx.forEach(function (di) {
-      chart.data.datasets[di].data.forEach(function (pt) {
-        pt.x = pt._x0 + o;
-        if (pt.x < lo) lo = pt.x;
-        if (pt.x > hi) hi = pt.x;
-      });
+      chart.data.datasets[di].data.forEach(function (pt) { pt.x = pt._x0 + o; });
     });
-    // ずらした B が軸外に出ないよう、必要なら軸を広げる (基準範囲は縮めない)。
-    chart.options.scales.x.min = lo;
-    chart.options.scales.x.max = hi;
+    // 軸の引き直しは呼び出し側 (refitX) に委譲: 表示中の系列だけを考慮する。
+    if (onApply) onApply(o);
     chart.update("none");
   };
   range.addEventListener("input", function () { apply(range.value); });
