@@ -42,8 +42,6 @@ import {
 } from "./env";
 import { applySchema } from "./migrations";
 import {
-  extractHcSpeedSamples,
-  jstDateStr,
   summarizeHistory,
   uploadKeyFor,
   uploadKeyForDateString,
@@ -1012,12 +1010,10 @@ app.get("/api/ghapi/workout", apiAuth, async (c) => {
   const startMs = typeof row.start_at === "string" ? Date.parse(row.start_at) : NaN;
   const endMs = typeof row.end_at === "string" ? Date.parse(row.end_at) : NaN;
   let overlapping: Record<string, unknown>[] = [];
-  let hcSpeed: Array<{ t: number; kmh: number }> = [];
+  let hcSessions: Record<string, unknown>[] = [];
   if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
-    const winStartMs = startMs - padMs;
-    const winEndMs = endMs + padMs;
-    const winStart = new Date(winStartMs).toISOString();
-    const winEnd = new Date(winEndMs).toISOString();
+    const winStart = new Date(startMs - padMs).toISOString();
+    const winEnd = new Date(endMs + padMs).toISOString();
     const res = await c.env.DB.prepare(
       "SELECT * FROM workouts WHERE source = 'ghapi' AND start_at < ? AND end_at > ? ORDER BY start_at ASC",
     )
@@ -1025,25 +1021,19 @@ app.get("/api/ghapi/workout", apiAuth, async (c) => {
       .all<Record<string, unknown>>();
     overlapping = res.results ?? [];
 
-    // 速度は HC 実測 (細かいサンプル) から取る (Google Health の平均は使わない)。
-    // HC R2 file は JST 日付 key なので窓を JST 日付に変換して該当 file を読む。
-    const dates = new Set<string>([jstDateStr(winStartMs), jstDateStr(winEndMs)]);
-    for (const d of dates) {
-      const k = uploadKeyForDateString(d);
-      if (!k) continue;
-      const obj = await c.env.R2.get(k.key);
-      if (!obj) continue;
-      try {
-        const payload = JSON.parse(await obj.text());
-        hcSpeed = hcSpeed.concat(extractHcSpeedSamples(payload, winStartMs, winEndMs));
-      } catch {
-        /* corrupt HC payload → skip */
-      }
-    }
-    hcSpeed.sort((a, b) => a.t - b.t);
+    // 速度は /workout 合成チャートと同じく「session 別の平均速度の平坦線」で出す。
+    // raw の細かいサンプルは平均/点が混在して線が荒れる (= 間違った速度に見える)
+    // ため使わない。時間 overlap する HC session (de-doubled 済の distance) を返し、
+    // チャート側で各 session の avg km/h を平坦線で描く。Refs #60
+    const hcRes = await c.env.DB.prepare(
+      "SELECT id, activity_name, start_at, end_at, distance_m, duration_sec FROM workouts WHERE source = 'hc' AND start_at < ? AND end_at > ? ORDER BY start_at ASC",
+    )
+      .bind(winEnd, winStart)
+      .all<Record<string, unknown>>();
+    hcSessions = hcRes.results ?? [];
   }
 
-  return c.json({ row, samples, overlapping, hc_speed: hcSpeed });
+  return c.json({ row, samples, overlapping, hc_sessions: hcSessions });
 });
 
 /**

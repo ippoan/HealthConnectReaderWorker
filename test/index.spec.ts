@@ -2219,63 +2219,9 @@ describe("ghapi (Google Health API)", () => {
       .toEqual({ min: 100, max: 140, avg: 120, count: 3 });
   });
 
-  it("extractHcSpeedSamples picks the source with most samples (no multi-source mix)", async () => {
-    const { extractHcSpeedSamples } = await import("../src/r2");
-    const payload = {
-      speeds: [
-        {
-          source: "com.lifefitness", // treadmill: 3 samples (主記録)
-          samples: [
-            { time: "2026-05-27T20:26:00Z", kmh: 11.0 },
-            { time: "2026-05-27T20:27:00Z", kmh: 11.2 },
-            { time: "2026-05-27T20:28:00Z", kmh: 10.9 },
-          ],
-        },
-        {
-          source: "com.fitbit", // Fitbit: 1 sample (GPS) → 混ぜない
-          samples: [{ time: "2026-05-27T20:26:30Z", kmh: 9.0 }],
-        },
-      ],
-    };
-    const out = extractHcSpeedSamples(
-      payload,
-      Date.parse("2026-05-27T20:25:00Z"),
-      Date.parse("2026-05-27T20:37:00Z"),
-    );
-    expect(out.map((s) => s.kmh)).toEqual([11.0, 11.2, 10.9]);
-  });
-
   it("hrSeriesKey is deterministic per id", async () => {
     const { hrSeriesKey } = await import("../src/ghapi-ingest");
     expect(hrSeriesKey("ghapi_abc")).toBe("ghapi/hr/ghapi_abc.json");
-  });
-
-  it("extractHcSpeedSamples returns in-window samples sorted by time", async () => {
-    const { extractHcSpeedSamples } = await import("../src/r2");
-    const payload = {
-      speeds: [
-        {
-          samples: [
-            { time: "2026-05-27T20:10:00Z", kmh: 11.0 },
-            { time: "2026-05-27T20:05:00Z", kmh: 9.0 },
-            { time: "2026-05-27T19:00:00Z", kmh: 5.0 }, // 窓外 (前)
-            { time: "bad", kmh: 8 }, // 不正 time
-            { time: "2026-05-27T20:08:00Z", kmh: "10" }, // kmh 文字列 → 除外
-          ],
-        },
-      ],
-    };
-    const winStart = Date.parse("2026-05-27T20:00:00Z");
-    const winEnd = Date.parse("2026-05-27T20:30:00Z");
-    const out = extractHcSpeedSamples(payload, winStart, winEnd);
-    expect(out.map((s) => s.kmh)).toEqual([9.0, 11.0]);
-    expect(out[0].t).toBeLessThan(out[1].t);
-  });
-
-  it("jstDateStr maps UTC ms to JST date", async () => {
-    const { jstDateStr } = await import("../src/r2");
-    // 2026-05-27T20:00Z = JST 2026-05-28 05:00
-    expect(jstDateStr(Date.parse("2026-05-27T20:00:00Z"))).toBe("2026-05-28");
   });
 
   it("listHeartRateSamples parses samples (string bpm) + paginates + sorts", async () => {

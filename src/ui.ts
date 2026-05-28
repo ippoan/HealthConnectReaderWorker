@@ -1562,9 +1562,9 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
     <h2 class="font-semibold">心拍 + 速度</h2>
     <p class="text-[10px] text-slate-400">
-      赤 = 心拍 (Fitbit, 右軸 bpm)。青 = 速度 (HC 実測の細かいサンプル, 左軸 km/h)。
-      速度の上下と心拍の上下が同期するか確認できる。速度は HC、心拍は Fitbit から
-      取得し時間軸で重ねる。心拍は時刻ズレ対策で前後 5 分広げて取得。
+      赤 = 心拍 (Fitbit, 右軸 bpm)。色帯 = 各 HC session の平均速度 (左軸 km/h) を
+      期間で平坦表示。速度区間の境界で心拍が上下するかを確認できる。速度は HC、
+      心拍は Fitbit から取得し時間軸で重ねる。心拍は時刻ズレ対策で前後 5 分広げて取得。
     </p>
     <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
     <canvas id="hr-chart" height="220"></canvas>
@@ -1649,22 +1649,27 @@ async function load() {
     tension: 0.25,
     fill: true,
   }];
-  // 速度は HC 実測の細かいサンプル (hc_speed) を折れ線で重ねる。Google Health の
-  // 平均速度は使わない (区間平均だと 11km/h が均されて見えないため)。
-  const hcSpeed = Array.isArray(j.hc_speed) ? j.hc_speed : [];
-  if (hcSpeed.length > 0) {
+  // 速度は /workout 合成チャートと同じく「HC session 別の平均速度の平坦線」で出す。
+  // raw の細かいサンプルは平均/点が混在して荒れるため使わない。各 HC session を
+  // 1 本の平坦線 (start→end で avg km/h) として重ね、速度区間と心拍の同期を見る。
+  const hcSessions = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
+  const SPEED_COLORS = ["#0284c7", "#7c3aed", "#db2777", "#ea580c", "#16a34a", "#0891b2"];
+  hcSessions.forEach(function (w, i) {
+    if (w.distance_m == null || !w.duration_sec) return;
+    const v = (w.distance_m / 1000) / (w.duration_sec / 3600);
+    const s = w.start_at ? Date.parse(w.start_at) : null;
+    const e = w.end_at ? Date.parse(w.end_at) : null;
+    if (s == null || e == null) return;
     datasets.push({
-      label: "速度 (HC, km/h)",
-      data: hcSpeed.map(function (s) { return { x: s.t, y: s.kmh }; }),
+      label: (w.activity_name || "speed") + " " + v.toFixed(1) + "km/h",
+      data: [{ x: s, y: v }, { x: e, y: v }],
       yAxisID: "speed",
-      borderColor: "#0284c7",
-      backgroundColor: "rgba(2,132,199,0.06)",
-      borderWidth: 1.5,
+      borderColor: SPEED_COLORS[i % SPEED_COLORS.length],
+      borderWidth: 3,
       pointRadius: 0,
-      stepped: true,
       fill: false,
     });
-  }
+  });
 
   new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",

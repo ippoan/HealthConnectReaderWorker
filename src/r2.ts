@@ -30,63 +30,6 @@ export function uploadKeyForDateString(date: string): UploadKey | null {
   return { yyyy, mmdd: `${mm}-${dd}`, key: `hc/${yyyy}/${mm}-${dd}.json` };
 }
 
-export interface HcSpeedSample {
-  /** epoch ms */
-  t: number;
-  kmh: number;
-}
-
-/** epoch ms → JST (UTC+9) の `YYYY-MM-DD` (HC R2 file は JST 日付 key)。 */
-export function jstDateStr(ms: number): string {
-  return new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 10);
-}
-
-/**
- * HC payload (`{ speeds: [{ source, samples: [{ time, kmh }] }] }`) から時間窓
- * `[winStartMs, winEndMs]` に入る速度サンプルを抽出する。time は ISO 文字列。
- *
- * Health Connect は treadmill (belt 速度) と Fitbit (GPS 等) が同時間帯に別々の
- * SpeedRecord を書くため、全 source を混ぜると速度線が乱れる (= 間違った速度に
- * 見える)。**サンプル数が最多の source (主記録デバイス) だけ**を採用する。
- * 速度=HC 実測を ghapi 詳細チャートに重ねるため。Refs #60
- */
-export function extractHcSpeedSamples(
-  payload: unknown,
-  winStartMs: number,
-  winEndMs: number,
-): HcSpeedSample[] {
-  if (!payload || typeof payload !== "object") return [];
-  const speeds = (payload as { speeds?: unknown }).speeds;
-  if (!Array.isArray(speeds)) return [];
-  const bySource = new Map<string, HcSpeedSample[]>();
-  for (const sp of speeds) {
-    if (!sp || typeof sp !== "object") continue;
-    const src =
-      typeof (sp as { source?: unknown }).source === "string"
-        ? (sp as { source: string }).source
-        : "unknown";
-    const samples = (sp as { samples?: unknown }).samples;
-    if (!Array.isArray(samples)) continue;
-    for (const s of samples) {
-      const time = (s as { time?: unknown }).time;
-      const kmh = (s as { kmh?: unknown }).kmh;
-      if (typeof time !== "string" || typeof kmh !== "number") continue;
-      const t = Date.parse(time);
-      if (!Number.isFinite(t)) continue;
-      if (t < winStartMs || t > winEndMs) continue;
-      const arr = bySource.get(src) ?? [];
-      arr.push({ t, kmh });
-      bySource.set(src, arr);
-    }
-  }
-  let best: HcSpeedSample[] = [];
-  for (const arr of bySource.values()) {
-    if (arr.length > best.length) best = arr;
-  }
-  best.sort((a, b) => a.t - b.t);
-  return best;
-}
-
 const ZONES_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
 /**
