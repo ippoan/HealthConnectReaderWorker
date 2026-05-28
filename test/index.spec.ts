@@ -2030,10 +2030,9 @@ describe("ghapi (Google Health API)", () => {
         metricsSummary: {
           caloriesKcal: 320,
           distanceMillimeters: 5230500,
-          averageHeartRateBeatsPerMinute: 152,
-          minHeartRateBeatsPerMinute: 110,
-          maxHeartRateBeatsPerMinute: 178,
-          steps: 5400,
+          // Refs #65: Google Health API v4 は int64 を文字列で返す
+          averageHeartRateBeatsPerMinute: "152",
+          steps: "5400",
         },
       },
     };
@@ -2049,10 +2048,12 @@ describe("ghapi (Google Health API)", () => {
     expect(row?.distance_m).toBe(5230.5);
     expect(row?.duration_sec).toBe(30 * 60);
     expect(row?.active_calories).toBe(320);
+    // 文字列 int64 が数値として取り込まれる (旧バグでは null だった)
     expect(row?.steps).toBe(5400);
     expect(row?.avg_heart_rate).toBe(152);
-    expect(row?.min_heart_rate).toBe(110);
-    expect(row?.max_heart_rate).toBe(178);
+    // min/max HR は Google Health API に存在しないので常に null
+    expect(row?.min_heart_rate).toBeNull();
+    expect(row?.max_heart_rate).toBeNull();
     // id は安定 (同じ dataPoint name を投げると同じ row id)
     const row2 = await ghapiExercisePointToRow(
       point,
@@ -2180,6 +2181,51 @@ describe("ghapi (Google Health API)", () => {
     const { ingestExercisePoints } = await import("../src/ghapi-ingest");
     const res = await ingestExercisePoints(env.R2, env.DB, "Exercise", [], []);
     expect(res).toEqual({ rawKey: "", fetched: 0, indexed: 0 });
+  });
+
+  it("backfillDayStarts: full N-day window when no last_backfill_at", async () => {
+    const { backfillDayStarts } = await import("../src/ghapi-ingest");
+    const now = Date.UTC(2026, 4, 28, 10, 0, 0); // 2026-05-28 10:00 UTC
+    const { dayStarts, incremental } = backfillDayStarts(now, 7, null, false);
+    expect(incremental).toBe(false);
+    expect(dayStarts.length).toBe(7);
+    // newest first = today midnight
+    expect(dayStarts[0]).toBe(Date.UTC(2026, 4, 28));
+    expect(dayStarts[6]).toBe(Date.UTC(2026, 4, 22));
+  });
+
+  it("backfillDayStarts: incremental scans only since last_backfill_at day", async () => {
+    const { backfillDayStarts } = await import("../src/ghapi-ingest");
+    const now = Date.UTC(2026, 4, 28, 10, 0, 0);
+    // 最終取込が 2 日前 (2026-05-26 18:00 UTC)
+    const last = Date.UTC(2026, 4, 26, 18, 0, 0);
+    const { dayStarts, incremental } = backfillDayStarts(now, 30, last, false);
+    expect(incremental).toBe(true);
+    // 05-26, 05-27, 05-28 の 3 日だけ (last の暦日含む)
+    expect(dayStarts).toEqual([
+      Date.UTC(2026, 4, 28),
+      Date.UTC(2026, 4, 27),
+      Date.UTC(2026, 4, 26),
+    ]);
+  });
+
+  it("backfillDayStarts: force ignores last_backfill_at (full window)", async () => {
+    const { backfillDayStarts } = await import("../src/ghapi-ingest");
+    const now = Date.UTC(2026, 4, 28, 10, 0, 0);
+    const last = Date.UTC(2026, 4, 27, 0, 0, 0);
+    const { dayStarts, incremental } = backfillDayStarts(now, 7, last, true);
+    expect(incremental).toBe(false);
+    expect(dayStarts.length).toBe(7);
+  });
+
+  it("backfillDayStarts: old last_backfill_at clamped to N-day window", async () => {
+    const { backfillDayStarts } = await import("../src/ghapi-ingest");
+    const now = Date.UTC(2026, 4, 28, 10, 0, 0);
+    // last が window より古い (60 日前) → window 下限で頭打ち、incremental にならない
+    const last = Date.UTC(2026, 2, 1, 0, 0, 0);
+    const { dayStarts, incremental } = backfillDayStarts(now, 7, last, false);
+    expect(incremental).toBe(false);
+    expect(dayStarts.length).toBe(7);
   });
 
   it("POST /api/ghapi/backfill 401/500 without auth", async () => {

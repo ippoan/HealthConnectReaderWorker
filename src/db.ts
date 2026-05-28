@@ -226,12 +226,13 @@ export async function ghapiExercisePointToRow(
   const id = await ghapiPointId(dataPointId);
 
   const ms = ex.metricsSummary ?? {};
-  const distanceMm = ms.distanceMillimeters;
-  const calories = ms.caloriesKcal;
-  const steps = ms.steps;
-  const avgHr = ms.averageHeartRateBeatsPerMinute;
-  const minHr = ms.minHeartRateBeatsPerMinute;
-  const maxHr = ms.maxHeartRateBeatsPerMinute;
+  // Google Health API v4 は int64 (steps / averageHeartRateBeatsPerMinute) を
+  // protobuf JSON 規約で **文字列**で返すため、number / 数値文字列の両方を許容する。
+  // Refs #65
+  const distanceMm = toNum(ms.distanceMillimeters);
+  const calories = toNum(ms.caloriesKcal);
+  const steps = toNum(ms.steps);
+  const avgHr = toNum(ms.averageHeartRateBeatsPerMinute);
 
   const displayName = ex.displayName;
   const exerciseType = ex.exerciseType;
@@ -249,16 +250,28 @@ export async function ghapiExercisePointToRow(
     start_at: startAt,
     end_at: endAt,
     activity_name: activityName,
-    distance_m: typeof distanceMm === "number" ? distanceMm / 1000 : null,
+    distance_m: distanceMm !== null ? distanceMm / 1000 : null,
     duration_sec: Math.round((endMs - startMs) / 1000),
-    active_calories: typeof calories === "number" ? calories : null,
-    steps: typeof steps === "number" ? Math.round(steps) : null,
-    avg_heart_rate: typeof avgHr === "number" ? Math.round(avgHr) : null,
-    min_heart_rate: typeof minHr === "number" ? Math.round(minHr) : null,
-    max_heart_rate: typeof maxHr === "number" ? Math.round(maxHr) : null,
+    active_calories: calories,
+    steps: steps !== null ? Math.round(steps) : null,
+    avg_heart_rate: avgHr !== null ? Math.round(avgHr) : null,
+    // min/max 心拍は Google Health API v4 の exercise summary に存在しない
+    // (平均 HR + heartRateZoneDurations のみ)。null 固定が正。Refs #65
+    min_heart_rate: null,
+    max_heart_rate: null,
     raw_key: rawKey,
     uploaded_at: uploadedAt,
   };
+}
+
+/** number または数値文字列を number に正規化する。それ以外 / NaN は null。 */
+function toNum(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 }
 
 async function ghapiPointId(dataPointId: string): Promise<string> {

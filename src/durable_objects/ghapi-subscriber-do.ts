@@ -35,7 +35,7 @@ import {
   type GhapiDataPoint,
   type GhapiWebhookPayload,
 } from "../ghapi";
-import { ingestExercisePoints } from "../ghapi-ingest";
+import { ingestExercisePoints, backfillDayStarts } from "../ghapi-ingest";
 
 interface DOEnv {
   R2: R2Bucket;
@@ -50,6 +50,7 @@ const K_SUBSCRIPTION = "subscription_id";
 const K_CREATED_AT = "created_at";
 const K_LAST_EVENT_AT = "last_event_at";
 const K_LAST_EVENT_SUMMARY = "last_event_summary";
+const K_LAST_BACKFILL_AT = "last_backfill_at";
 
 export class GhapiSubscriberDO {
   state: DurableObjectState;
@@ -196,19 +197,25 @@ export class GhapiSubscriberDO {
    * Google Health の webhook subscription endpoint が "coming soon" のため
    * (= `createSubscription` が stub)、当面はこの手動 backfill が唯一の取込経路。
    *
-   * body: `{ days?: number }` (default 30、1〜365 に clamp)。
+   * body: `{ days?: number, force?: boolean }` (days は default 30、1〜365 に clamp)。
    * UTC の暦日ごとに interval を切る (R2 key の `{mm-dd}` が 1 日 1 ファイルに
    * なるよう `ingestExercisePoints` に 1 日分ずつ渡す)。
+   *
+   * 差分取込: `force` でなく `last_backfill_at` がある場合、その暦日以降だけを
+   * 走査する (= 毎回 N 日全件叩き直す無駄を避ける。最後の取込日は再取込されるが
+   * stable id upsert なので冪等)。`force: true` で N 日全件を強制再取込。
    */
   private async handleBackfill(req: Request): Promise<Response> {
     let days = 30;
+    let force = false;
     try {
-      const body = (await req.json()) as { days?: unknown };
+      const body = (await req.json()) as { days?: unknown; force?: unknown };
       if (typeof body.days === "number" && Number.isFinite(body.days)) {
         days = Math.floor(body.days);
       }
+      if (body.force === true) force = true;
     } catch {
-      // body 無し / 不正 → default 30
+      // body 無し / 不正 → default
     }
     days = Math.max(1, Math.min(365, days));
 
@@ -224,17 +231,26 @@ export class GhapiSubscriberDO {
     }
 
     const DAY_MS = 86_400_000;
-    // UTC midnight 境界に丸める (Health API の civil_start_time filter が
-    // 暦日単位で効くよう、interval を [UTC 00:00, 翌 UTC 00:00) に揃える)。
-    const todayMidnight = Math.floor(Date.now() / DAY_MS) * DAY_MS;
+    const lastBackfillAt =
+      await this.state.storage.get<number>(K_LAST_BACKFILL_AT);
+    // 走査対象の UTC 暦日 (各日 00:00 UTC) を新しい順に列挙。差分取込なら
+    // last_backfill_at の暦日以降だけ。Health API の civil_start_time filter は
+    // 暦日単位なので interval は [00:00 UTC, 翌 00:00 UTC) に揃える。
+    const { dayStarts, incremental } = backfillDayStarts(
+      Date.now(),
+      days,
+      lastBackfillAt,
+      force,
+    );
+
     let totalFetched = 0;
     let totalIndexed = 0;
+    let daysScanned = 0;
     const errors: string[] = [];
 
-    for (let i = 0; i < days; i++) {
-      const dayStart = todayMidnight - i * DAY_MS;
-      const dayEnd = dayStart + DAY_MS;
-      const interval = { startTimeMillis: dayStart, endTimeMillis: dayEnd };
+    for (const dayStart of dayStarts) {
+      daysScanned++;
+      const interval = { startTimeMillis: dayStart, endTimeMillis: dayStart + DAY_MS };
       let points: GhapiDataPoint[];
       try {
         points = await listExercisePoints(accessToken, [interval]);
@@ -258,14 +274,22 @@ export class GhapiSubscriberDO {
       totalIndexed += indexed;
     }
 
+    const now = Date.now();
+    const mode = force ? "force" : incremental ? "incr" : "full";
     await this.state.storage.put({
-      [K_LAST_EVENT_AT]: Date.now(),
-      [K_LAST_EVENT_SUMMARY]: `backfill ${days}d: ${totalFetched} points, ${totalIndexed} indexed`,
+      [K_LAST_EVENT_AT]: now,
+      [K_LAST_EVENT_SUMMARY]: `backfill ${mode} ${daysScanned}d: ${totalFetched} points, ${totalIndexed} indexed`,
+      // 1 日でも失敗が無かったときだけ last_backfill_at を進める
+      // (全失敗で進めると未取込の穴が残るため)。
+      ...(errors.length === 0 ? { [K_LAST_BACKFILL_AT]: now } : {}),
     });
 
     return json(200, {
       ok: true,
       days,
+      days_scanned: daysScanned,
+      incremental,
+      force,
       fetched: totalFetched,
       indexed: totalIndexed,
       errors: errors.length,
@@ -312,6 +336,7 @@ export class GhapiSubscriberDO {
       K_CREATED_AT,
       K_LAST_EVENT_AT,
       K_LAST_EVENT_SUMMARY,
+      K_LAST_BACKFILL_AT,
     ]);
     const m = map as Map<string, unknown>;
     const connected = typeof m.get(K_REFRESH) === "string";
@@ -332,6 +357,10 @@ export class GhapiSubscriberDO {
       last_event_summary:
         typeof m.get(K_LAST_EVENT_SUMMARY) === "string"
           ? m.get(K_LAST_EVENT_SUMMARY)
+          : null,
+      last_backfill_at:
+        typeof m.get(K_LAST_BACKFILL_AT) === "number"
+          ? m.get(K_LAST_BACKFILL_AT)
           : null,
     });
   }
