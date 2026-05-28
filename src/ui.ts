@@ -1781,6 +1781,23 @@ async function populateCompare() {
   }
 }
 
+// 心拍 (hr) 軸の min/max を samples の範囲 ±余白 (5bpm 丸め) で返す。
+// 明示指定することで、速度系列を凡例トグルで消しても hr 軸が再スケールされず
+// 心拍データの上下マージンが保たれる。samples 空なら {} (= Chart auto)。
+// Refs ippoan/HealthConnectReader#6
+function hrAxisBounds(samples) {
+  if (!samples || !samples.length) return {};
+  var lo = Infinity, hi = -Infinity;
+  for (var i = 0; i < samples.length; i++) {
+    var b = samples[i].bpm;
+    if (typeof b !== "number") continue;
+    if (b < lo) lo = b;
+    if (b > hi) hi = b;
+  }
+  if (!isFinite(lo) || !isFinite(hi)) return {};
+  return { min: Math.max(0, Math.floor((lo - 8) / 5) * 5), max: Math.ceil((hi + 8) / 5) * 5 };
+}
+
 function renderSingle(j) {
   const summaryEl = document.getElementById("summary");
   const row = j.row || {};
@@ -1841,6 +1858,7 @@ function renderSingle(j) {
     });
   });
 
+  const hrB = hrAxisBounds(samples);
   const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",
     data: { datasets: datasets },
@@ -1852,7 +1870,7 @@ function renderSingle(j) {
           type: "linear",
           ticks: { callback: function (v) { return fmtClock(v); }, maxTicksLimit: 8 },
         },
-        hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
+        hr: { type: "linear", position: "right", min: hrB.min, max: hrB.max, title: { display: true, text: "bpm" } },
         speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
       },
       plugins: {
@@ -1986,6 +2004,7 @@ function renderCompare(jA, jB) {
   const sliderMax = Math.max.apply(null, sCandMax);
   const sliderMin = Math.min.apply(null, sCandMin);
 
+  const hrB = hrAxisBounds(samplesA.concat(samplesB));
   const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",
     data: { datasets: datasets },
@@ -1998,7 +2017,7 @@ function renderCompare(jA, jB) {
           title: { display: true, text: "経過 (分)" },
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
-        hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
+        hr: { type: "linear", position: "right", min: hrB.min, max: hrB.max, title: { display: true, text: "bpm" } },
         speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
       },
       plugins: {
@@ -2375,7 +2394,21 @@ function setHrSamples(samples) {
     });
     hrDatasetIdx = chart.data.datasets.length - 1;
     $("chart-empty").classList.add("hidden");
+    // 心拍軸を samples 範囲 ±余白で固定 (速度帯トグルで潰れないように)。
+    var lo = Infinity, hi = -Infinity;
+    for (var i = 0; i < samples.length; i++) {
+      var b = samples[i].bpm;
+      if (typeof b !== "number") continue;
+      if (b < lo) lo = b;
+      if (b > hi) hi = b;
+    }
+    if (isFinite(lo) && isFinite(hi)) {
+      chart.options.scales.hr.min = Math.max(0, Math.floor((lo - 8) / 5) * 5);
+      chart.options.scales.hr.max = Math.ceil((hi + 8) / 5) * 5;
+    }
   } else {
+    chart.options.scales.hr.min = undefined;
+    chart.options.scales.hr.max = undefined;
     $("chart-empty").classList.remove("hidden");
   }
   chart.update("none");
