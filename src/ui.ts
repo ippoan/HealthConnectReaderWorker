@@ -389,6 +389,7 @@ function fmtKm(m) {
 function badge(type) {
   if (type === "matched") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800">突合</span>';
   if (type === "hc_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800">HC のみ</span>';
+  if (type === "ghapi_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-fuchsia-100 text-fuchsia-800">Google Health</span>';
   return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-100 text-amber-800">Zones のみ</span>';
 }
 function renderItem(it) {
@@ -453,6 +454,19 @@ function renderItem(it) {
       '</div>',
       '<button class="text-[10px] text-emerald-700 hover:underline shrink-0" ',
         'data-action="link" data-side="hc" data-id="', escapeHtml(hc.id), '">Zones とリンク</button>',
+      '</div>',
+    ].join("");
+  }
+  if (it.type === "ghapi_only") {
+    const gh = it.ghapi;
+    return [
+      '<div class="border-l-2 border-fuchsia-300 pl-2 py-1">',
+      '<div class="text-xs font-medium">', badge("ghapi_only"),
+      ' ', fmtTime(gh.start_at), '–', fmtTime(gh.end_at),
+      ' ', escapeHtml(gh.activity_name || "—"), '</div>',
+      '<div class="text-[11px] text-slate-600">Google Health: ', fmtKm(gh.distance_m),
+      ' / ', fmtDur(gh.duration_sec),
+      ' / ♥', (gh.avg_heart_rate ?? "—"), '</div>',
       '</div>',
     ].join("");
   }
@@ -523,7 +537,8 @@ async function refreshWorkouts() {
     html.push('<details class="border border-slate-200 rounded-lg" open>');
     html.push('<summary class="cursor-pointer select-none px-3 py-2 text-sm flex items-center justify-between">');
     html.push('<span class="font-medium">', day.date, '</span>');
-    html.push('<span class="text-[11px] text-slate-500">HC ', day.hc_count, ' / Zones ', day.zones_count, ' / 突合 ', day.matched_count, '</span>');
+    html.push('<span class="text-[11px] text-slate-500">HC ', day.hc_count, ' / Zones ', day.zones_count,
+              (day.ghapi_count ? ' / GH ' + day.ghapi_count : ''), ' / 突合 ', day.matched_count, '</span>');
     html.push('</summary>');
     html.push('<div class="px-3 pb-2 space-y-1">');
     for (const it of day.items) html.push(renderItem(it));
@@ -1430,6 +1445,8 @@ async function refreshPicker() {
     dayHdr.textContent = day.date + " (" + day.items.length + " グループ)";
     list.appendChild(dayHdr);
     for (const it of day.items) {
+      // ghapi_only は HC×Zones 合成 chart の対象外なので picker から除外。
+      if (it.type === "ghapi_only") continue;
       const row = document.createElement("label");
       row.className = "flex items-start gap-2 text-[11px] text-slate-700 pl-2 cursor-pointer hover:bg-slate-50 rounded px-1";
       const cb = document.createElement("input");

@@ -514,12 +514,14 @@ export type WorkoutMatchItem =
       has_manual: boolean;
     }
   | { type: "hc_only"; hc: WorkoutRow }
-  | { type: "zones_only"; zones: WorkoutRow };
+  | { type: "zones_only"; zones: WorkoutRow }
+  | { type: "ghapi_only"; ghapi: WorkoutRow };
 
 export interface WorkoutDay {
   date: string;
   hc_count: number;
   zones_count: number;
+  ghapi_count: number;
   matched_count: number;
   items: WorkoutMatchItem[];
 }
@@ -662,6 +664,7 @@ function startAtOf(it: WorkoutMatchItem): string {
     return all[0] ?? "";
   }
   if (it.type === "hc_only") return it.hc.start_at ?? "";
+  if (it.type === "ghapi_only") return it.ghapi.start_at ?? "";
   return it.zones.start_at ?? "";
 }
 
@@ -709,6 +712,7 @@ export function groupAndMatch(
   // ----- 全 row に対する union-find (cross-day manual pair を許容するため) -----
   const hcs = rows.filter((r) => r.source === "hc");
   const zones = rows.filter((r) => r.source === "zones");
+  const ghapis = rows.filter((r) => r.source === "ghapi");
   const hcIds = new Set(hcs.map((h) => h.id));
   const zonesIds = new Set(zones.map((z) => z.id));
   const parent = new Map<string, string>();
@@ -729,8 +733,10 @@ export function groupAndMatch(
     const ra = find(a), rb = find(b);
     if (ra !== rb) parent.set(ra, rb);
   }
-  // ghapi など hc/zones 以外の source は突合グラフに乗せない (= ghapi 用に
-  // 別 UI セクションで表示する)。Refs ippoan/HealthConnectReaderWorker#60
+  // ghapi は HC/Zones の bipartite 突合グラフには乗せず、日付別ビューに
+  // `ghapi_only` 単独アイテムとして出す (HC とほぼ同じ Health Connect 由来で
+  // あり時刻突合させると HC と重複ペアになりがちなため)。
+  // Refs ippoan/HealthConnectReaderWorker#60
   for (const r of rows) {
     if (r.source !== "hc" && r.source !== "zones") continue;
     find(nodeId(r.source, r.id));
@@ -863,6 +869,11 @@ export function groupAndMatch(
     }
   }
 
+  // ghapi は突合グラフに乗せず、各 row を所属日付に `ghapi_only` で push する。
+  for (const gh of ghapis) {
+    pushTo(rowDate(gh), { type: "ghapi_only", ghapi: gh });
+  }
+
   // ----- WorkoutDay 配列に成型 -----
   const days: WorkoutDay[] = [];
   for (const [date, items] of itemsByDate) {
@@ -870,16 +881,17 @@ export function groupAndMatch(
       const ea = startAtOf(a), eb = startAtOf(b);
       return ea < eb ? -1 : ea > eb ? 1 : 0;
     });
-    let hc_count = 0, zones_count = 0, matched_count = 0;
+    let hc_count = 0, zones_count = 0, ghapi_count = 0, matched_count = 0;
     for (const it of items) {
       if (it.type === "matched") {
         hc_count += it.hcs.length;
         zones_count += it.zoneses.length;
         matched_count += 1;
       } else if (it.type === "hc_only") hc_count += 1;
+      else if (it.type === "ghapi_only") ghapi_count += 1;
       else zones_count += 1;
     }
-    days.push({ date, hc_count, zones_count, matched_count, items });
+    days.push({ date, hc_count, zones_count, ghapi_count, matched_count, items });
   }
   days.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   return days;
