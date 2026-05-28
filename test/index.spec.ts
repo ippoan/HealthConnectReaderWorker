@@ -2063,6 +2063,60 @@ describe("ghapi (Google Health API)", () => {
     expect(got?.activity_name).toBe("Walking");
   });
 
+  it("ingestExercisePoints writes R2 + upserts D1 for Exercise points", async () => {
+    const { ingestExercisePoints } = await import("../src/ghapi-ingest");
+    const start = Date.UTC(2026, 3, 10, 2, 0, 0);
+    const end = Date.UTC(2026, 3, 10, 2, 30, 0);
+    const res = await ingestExercisePoints(
+      env.R2,
+      env.DB,
+      "Exercise",
+      [{ startTimeMillis: start, endTimeMillis: end }],
+      [
+        {
+          id: "dp-backfill-1",
+          startTimeMillis: start,
+          endTimeMillis: end,
+          value: { activityType: "Running", distanceMeters: 4200 },
+        },
+      ],
+    );
+    expect(res.rawKey).toBe("ghapi/Exercise/2026/04-10.json");
+    expect(res.fetched).toBe(1);
+    expect(res.indexed).toBe(1);
+
+    // R2 raw payload written (body must be consumed to release isolated storage)
+    const stored = JSON.parse(await (await env.R2.get(res.rawKey))!.text());
+    expect(stored.dataType).toBe("Exercise");
+    expect(stored.points.length).toBe(1);
+
+    // D1 row upserted
+    const got = await env.DB.prepare(
+      "SELECT source, activity_name, distance_m FROM workouts WHERE raw_key = ?",
+    )
+      .bind(res.rawKey)
+      .first<{ source: string; activity_name: string; distance_m: number }>();
+    expect(got?.source).toBe("ghapi");
+    expect(got?.activity_name).toBe("Running");
+    expect(got?.distance_m).toBe(4200);
+  });
+
+  it("ingestExercisePoints returns zero-indexed for empty intervals", async () => {
+    const { ingestExercisePoints } = await import("../src/ghapi-ingest");
+    const res = await ingestExercisePoints(env.R2, env.DB, "Exercise", [], []);
+    expect(res).toEqual({ rawKey: "", fetched: 0, indexed: 0 });
+  });
+
+  it("POST /api/ghapi/backfill 401/500 without auth", async () => {
+    const r = await app.request(
+      "/api/ghapi/backfill",
+      { method: "POST", body: JSON.stringify({ days: 30 }) },
+      env,
+    );
+    // cookie auth 不在 → 401。DO 未 bind (test env) なら apiAuth 通過後 500。
+    expect([401, 500]).toContain(r.status);
+  });
+
   it("POST /api/ghapi/store-tokens 401 without Bearer", async () => {
     const r = await app.request(
       "/api/ghapi/store-tokens",

@@ -20,6 +20,11 @@ Refs ippoan/HealthConnectReader#6
 | GET    | `/api/history`       | Bearer **or** cookie | R2 `hc/` listing → `{ count, latest }` を返す              |
 | GET    | `/api/zones`         | Bearer **or** cookie | D1 `workouts` (source='zones') を `uploaded_at` desc で → `{ count, items: [{date, uuid, key, uploaded}] }` |
 | POST   | `/_admin/migrate`    | Bearer **or** cookie | `src/migrations.ts` の `SCHEMA_STATEMENTS` を D1 に idempotent 適用 |
+| GET    | `/ghapi/connect`     | cookie            | auth-worker の Google Health OAuth redirect へ 302 (Refs #60) |
+| GET    | `/api/ghapi/connected` | cookie          | OAuth 完了後の landing HTML                                |
+| GET    | `/api/ghapi/status`  | Bearer **or** cookie | Google Health 接続状態 + 直近 event + 取込済 workout 件数 |
+| POST   | `/api/ghapi/backfill` | Bearer **or** cookie | webhook を待たず過去 N 日分の Exercise を `dataPoints:list` で取込 (`{days?:30}`) |
+| POST   | `/api/ghapi/disconnect` | Bearer **or** cookie | token revoke + subscription 削除 + DO storage clear     |
 | GET    | `/favicon.ico`       | none              | 単色 16x16 ICO (404 抑止)                                  |
 
 ## 認証

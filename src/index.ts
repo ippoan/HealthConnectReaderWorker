@@ -934,6 +934,39 @@ app.get("/api/ghapi/status", apiAuth, async (c) => {
 });
 
 /**
+ * `POST /api/ghapi/backfill` — webhook を待たず過去 N 日分の Exercise を取込む。
+ *
+ * body: `{ days?: number }` (default 30)。cookie / Bearer auth (`apiAuth`)。
+ * DO の `/backfill` に forward して結果 (`{ fetched, indexed }`) を返す。
+ */
+app.post("/api/ghapi/backfill", apiAuth, async (c) => {
+  const stub = getGhapiStub(c.env);
+  if (!stub) return c.json({ error: "ghapi_do_not_bound" }, 500);
+
+  let days = 30;
+  try {
+    const body = (await c.req.json()) as { days?: unknown };
+    if (typeof body.days === "number" && Number.isFinite(body.days)) {
+      days = Math.floor(body.days);
+    }
+  } catch {
+    // body 無し → default
+  }
+
+  const resp = await stub.fetch(
+    new Request("https://ghapi-do/backfill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ days }),
+    }),
+  );
+  return new Response(await resp.text(), {
+    status: resp.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
+
+/**
  * `POST /api/ghapi/disconnect` — revoke + subscription 削除 + DO storage clear。
  */
 app.post("/api/ghapi/disconnect", apiAuth, async (c) => {
