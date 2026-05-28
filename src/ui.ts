@@ -2148,7 +2148,7 @@ export const MANUAL_CREATE_HTML = `<!doctype html>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
 <div class="max-w-3xl mx-auto p-4 space-y-4">
   <header class="flex items-center justify-between pt-2">
-    <a href="/" class="text-sm text-emerald-700">‹ 戻る</a>
+    <a id="back-link" href="/" class="text-sm text-emerald-700">‹ 戻る</a>
     <h1 class="text-lg font-semibold">HC データ手動作成</h1>
     <span></span>
   </header>
@@ -2543,6 +2543,10 @@ document.addEventListener("DOMContentLoaded", function () {
   $("ex-select").innerHTML = EX.map(function (e) { return '<option value="' + e[0] + '">' + esc(e[1]) + "</option>"; }).join("");
   // 開始時刻 default = now
   $("start-dt").value = toLocalInput(Date.now());
+  // ?ghapi=<id> 経由なら「戻る」を基準の心拍ページに戻す (作成後に元の HR へ)
+  if (initGhapi) {
+    $("back-link").href = "/ghapi/workout?id=" + encodeURIComponent(initGhapi);
+  }
   ensureChart();
   $("anchor-select").addEventListener("change", onAnchorChange);
   $("distance-input").addEventListener("input", recomputeDuration);
