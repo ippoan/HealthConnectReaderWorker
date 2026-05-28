@@ -390,6 +390,10 @@ function fmtKm(m) {
   if (m === null || m === undefined) return "—";
   return (m / 1000).toFixed(2) + " km";
 }
+function fmtKmh(m, sec) {
+  if (m === null || m === undefined || !sec) return "—";
+  return ((m / 1000) / (sec / 3600)).toFixed(1) + " km/h";
+}
 function badge(type) {
   if (type === "matched") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800">突合</span>';
   if (type === "hc_only") return '<span class="inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-sky-100 text-sky-800">HC のみ</span>';
@@ -433,14 +437,15 @@ function renderItem(it) {
       html.push('<div class="text-[11px] text-sky-700 pl-1">');
       html.push('🏃 HC ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at), ' ',
                 escapeHtml(hc.activity_name || "—"),
-                ' · ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec));
+                ' · ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec),
+                ' / ', fmtKmh(hc.distance_m, hc.duration_sec));
       html.push('</div>');
     }
     for (const z of zs) {
       html.push('<div class="text-[11px] text-amber-700 pl-1">');
       html.push('⌚ Zones ', fmtTime(z.start_at), '–', fmtTime(z.end_at), ' ',
                 escapeHtml(z.activity_name || "—"),
-                ' · ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"));
+                ' · ', fmtKm(z.distance_m), ' / ', fmtKmh(z.distance_m, z.duration_sec), ' / ♥', (z.avg_heart_rate ?? "—"));
       html.push('</div>');
     }
     html.push('</div>');
@@ -454,7 +459,7 @@ function renderItem(it) {
       '<div class="text-xs font-medium">', badge("hc_only"),
       ' ', fmtTime(hc.start_at), '–', fmtTime(hc.end_at),
       ' ', escapeHtml(hc.activity_name || "—"), '</div>',
-      '<div class="text-[11px] text-slate-600">HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), '</div>',
+      '<div class="text-[11px] text-slate-600">HC: ', fmtKm(hc.distance_m), ' / ', fmtDur(hc.duration_sec), ' / ', fmtKmh(hc.distance_m, hc.duration_sec), '</div>',
       '</div>',
       '<button class="text-[10px] text-emerald-700 hover:underline shrink-0" ',
         'data-action="link" data-side="hc" data-id="', escapeHtml(hc.id), '">Zones とリンク</button>',
@@ -471,6 +476,7 @@ function renderItem(it) {
       ' ', escapeHtml(gh.activity_name || "—"), '</div>',
       '<div class="text-[11px] text-slate-600">Google Health: ', fmtKm(gh.distance_m),
       ' / ', fmtDur(gh.duration_sec),
+      ' / ', fmtKmh(gh.distance_m, gh.duration_sec),
       ' / ♥', (gh.avg_heart_rate ?? "—"), '</div>',
       '</div>',
       '<a class="text-[10px] text-fuchsia-700 hover:underline shrink-0" href="/ghapi/workout?id=',
@@ -485,7 +491,7 @@ function renderItem(it) {
     '<div class="text-xs font-medium">', badge("zones_only"),
     ' ', fmtTime(z.start_at), '–', fmtTime(z.end_at),
     ' ', escapeHtml(z.activity_name || "—"), '</div>',
-    '<div class="text-[11px] text-slate-600">Zones: ', fmtKm(z.distance_m), ' / ♥', (z.avg_heart_rate ?? "—"), '</div>',
+    '<div class="text-[11px] text-slate-600">Zones: ', fmtKm(z.distance_m), ' / ', fmtKmh(z.distance_m, z.duration_sec), ' / ♥', (z.avg_heart_rate ?? "—"), '</div>',
     '</div>',
     '<button class="text-[10px] text-emerald-700 hover:underline shrink-0" ',
       'data-action="link" data-side="zones" data-id="', escapeHtml(z.id), '">HC とリンク</button>',
