@@ -881,6 +881,35 @@ describe("hcPayloadToRows (HC → workouts 正規化)", () => {
     expect(r.raw_key).toBe("hc/2026/05-01.json");
   });
 
+  it("does NOT double-count distance across sources (treadmill + Fitbit) — takes max", async () => {
+    const payload = {
+      date: "2026-05-01",
+      sessions: [
+        {
+          startTime: "2026-05-01T08:00:00Z",
+          endTime: "2026-05-01T08:30:00Z",
+          exerciseType: 56,
+          title: null,
+          source: "com.lifefitness",
+        },
+      ],
+      distances: [
+        // treadmill が全区間 2.0km を記録
+        { startTime: "2026-05-01T08:00:00Z", endTime: "2026-05-01T08:30:00Z", km: 2.0, source: "com.lifefitness" },
+        // Fitbit が同じ実距離を別途記録 (≈2.0km)。単純合算すると 4km に二重化する
+        { startTime: "2026-05-01T08:00:00Z", endTime: "2026-05-01T08:30:00Z", km: 2.1, source: "com.fitbit" },
+      ],
+    };
+    const rows = await hcPayloadToRows(
+      payload,
+      "hc/2026/05-01.json",
+      "2026-05-01",
+      "2026-05-01T09:00:00.000Z",
+    );
+    // sum (4100m) ではなく source 別 max (2.1km → 2100m)
+    expect(rows[0].distance_m).toBe(2100);
+  });
+
   it("uses title when present, falls back to exerciseType name", async () => {
     const payload = {
       sessions: [
@@ -2188,6 +2217,32 @@ describe("ghapi (Google Health API)", () => {
     expect(summarizeHr([])).toBeNull();
     expect(summarizeHr([{ t: 1, bpm: 100 }, { t: 2, bpm: 140 }, { t: 3, bpm: 120 }]))
       .toEqual({ min: 100, max: 140, avg: 120, count: 3 });
+  });
+
+  it("extractHcSpeedSamples picks the source with most samples (no multi-source mix)", async () => {
+    const { extractHcSpeedSamples } = await import("../src/r2");
+    const payload = {
+      speeds: [
+        {
+          source: "com.lifefitness", // treadmill: 3 samples (主記録)
+          samples: [
+            { time: "2026-05-27T20:26:00Z", kmh: 11.0 },
+            { time: "2026-05-27T20:27:00Z", kmh: 11.2 },
+            { time: "2026-05-27T20:28:00Z", kmh: 10.9 },
+          ],
+        },
+        {
+          source: "com.fitbit", // Fitbit: 1 sample (GPS) → 混ぜない
+          samples: [{ time: "2026-05-27T20:26:30Z", kmh: 9.0 }],
+        },
+      ],
+    };
+    const out = extractHcSpeedSamples(
+      payload,
+      Date.parse("2026-05-27T20:25:00Z"),
+      Date.parse("2026-05-27T20:37:00Z"),
+    );
+    expect(out.map((s) => s.kmh)).toEqual([11.0, 11.2, 10.9]);
   });
 
   it("hrSeriesKey is deterministic per id", async () => {

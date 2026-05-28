@@ -42,20 +42,29 @@ export function jstDateStr(ms: number): string {
 }
 
 /**
- * HC payload (`{ speeds: [{ samples: [{ time, kmh }] }] }`) から時間窓
+ * HC payload (`{ speeds: [{ source, samples: [{ time, kmh }] }] }`) から時間窓
  * `[winStartMs, winEndMs]` に入る速度サンプルを抽出する。time は ISO 文字列。
- * 速度=HC 実測 (細かいサンプル) を ghapi 詳細チャートに重ねるため。Refs #60
+ *
+ * Health Connect は treadmill (belt 速度) と Fitbit (GPS 等) が同時間帯に別々の
+ * SpeedRecord を書くため、全 source を混ぜると速度線が乱れる (= 間違った速度に
+ * 見える)。**サンプル数が最多の source (主記録デバイス) だけ**を採用する。
+ * 速度=HC 実測を ghapi 詳細チャートに重ねるため。Refs #60
  */
 export function extractHcSpeedSamples(
   payload: unknown,
   winStartMs: number,
   winEndMs: number,
 ): HcSpeedSample[] {
-  const out: HcSpeedSample[] = [];
-  if (!payload || typeof payload !== "object") return out;
+  if (!payload || typeof payload !== "object") return [];
   const speeds = (payload as { speeds?: unknown }).speeds;
-  if (!Array.isArray(speeds)) return out;
+  if (!Array.isArray(speeds)) return [];
+  const bySource = new Map<string, HcSpeedSample[]>();
   for (const sp of speeds) {
+    if (!sp || typeof sp !== "object") continue;
+    const src =
+      typeof (sp as { source?: unknown }).source === "string"
+        ? (sp as { source: string }).source
+        : "unknown";
     const samples = (sp as { samples?: unknown }).samples;
     if (!Array.isArray(samples)) continue;
     for (const s of samples) {
@@ -65,11 +74,17 @@ export function extractHcSpeedSamples(
       const t = Date.parse(time);
       if (!Number.isFinite(t)) continue;
       if (t < winStartMs || t > winEndMs) continue;
-      out.push({ t, kmh });
+      const arr = bySource.get(src) ?? [];
+      arr.push({ t, kmh });
+      bySource.set(src, arr);
     }
   }
-  out.sort((a, b) => a.t - b.t);
-  return out;
+  let best: HcSpeedSample[] = [];
+  for (const arr of bySource.values()) {
+    if (arr.length > best.length) best = arr;
+  }
+  best.sort((a, b) => a.t - b.t);
+  return best;
 }
 
 const ZONES_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;

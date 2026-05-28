@@ -405,8 +405,12 @@ function overlapDistanceMeters(
   const s = Date.parse(startAt);
   const e = Date.parse(endAt);
   if (Number.isNaN(s) || Number.isNaN(e)) return null;
-  let totalKm = 0;
-  let matched = 0;
+  // session 期間と overlap する distance record を **source (デバイス) ごと**に
+  // 合算する。Health Connect は treadmill (Life Fitness) と Fitbit 等、複数
+  // デバイスが同じ実距離を別々に記録するため、全 source を単純合算すると距離が
+  // 二重 (≈2倍) になる。同一 source 内は順次セグメントを sum し、source 間は
+  // 同じ実距離の重複なので **max** を採る。Refs #60
+  const kmBySource = new Map<string, number>();
   for (const d of distances) {
     if (!d || typeof d !== "object") continue;
     const ds = Date.parse(
@@ -415,13 +419,18 @@ function overlapDistanceMeters(
     const de = Date.parse(String((d as { endTime?: unknown }).endTime ?? ""));
     const km = (d as { km?: unknown }).km;
     if (Number.isNaN(ds) || Number.isNaN(de) || typeof km !== "number") continue;
-    // session 期間と overlap する distance record を合算 (区間切り出しはしない)。
     if (ds < e && de > s) {
-      totalKm += km;
-      matched++;
+      const src =
+        typeof (d as { source?: unknown }).source === "string"
+          ? (d as { source: string }).source
+          : "unknown";
+      kmBySource.set(src, (kmBySource.get(src) ?? 0) + km);
     }
   }
-  return matched > 0 ? Math.round(totalKm * 1000) : null;
+  if (kmBySource.size === 0) return null;
+  let maxKm = 0;
+  for (const v of kmBySource.values()) if (v > maxKm) maxKm = v;
+  return Math.round(maxKm * 1000);
 }
 
 /**
