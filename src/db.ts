@@ -172,27 +172,29 @@ export async function upsertWorkout(db: D1Database, row: WorkoutRow): Promise<vo
 }
 
 /**
- * Google Health API (ghapi) の Exercise data point を D1 workouts row に
- * 正規化する。サンプルレスポンス想定:
+ * Google Health API v4 の `exercise` dataPoint を D1 workouts row に正規化する。
+ * レスポンス shape (`GET /v4/users/me/dataTypes/exercise/dataPoints`):
  *
  *   {
- *     id: "<dataPoint id>",
- *     startTimeMillis: 1716615600000,
- *     endTimeMillis: 1716619200000,
- *     dataType: "Exercise",
- *     value: {
- *       activityType: "Running",
- *       distanceMeters: 5230.5,
- *       activeKilocalories: 320,
- *       steps: 5400,
- *       averageHeartRate: 152,
- *       minHeartRate: 110,
- *       maxHeartRate: 178
+ *     "name": "users/me/dataTypes/exercise/dataPoints/<id>",
+ *     "exercise": {
+ *       "interval": { "startTime": "2026-05-25T19:38:43Z", "endTime": "..." },
+ *       "exerciseType": "RUNNING",
+ *       "displayName": "Morning run",
+ *       "metricsSummary": {
+ *         "caloriesKcal": 320,
+ *         "distanceMillimeters": 5230500,
+ *         "averageHeartRateBeatsPerMinute": 152,
+ *         "minHeartRateBeatsPerMinute": 110,
+ *         "maxHeartRateBeatsPerMinute": 178,
+ *         "steps": 5400
+ *       }
  *     }
  *   }
  *
- * 未知 field は null。activity_name は `value.activityType` を流用。
- * id 規約: `ghapi:<dataPoint id>` を SHA-256 上位 16 hex (再 fetch で安定)。
+ * 距離は mm → m に変換、HR/steps は四捨五入。activity_name は displayName 優先、
+ * 無ければ exerciseType。未知 field は null。
+ * id 規約: `ghapi:<dataPoint name>` を SHA-256 上位 16 hex (再 fetch で安定)。
  *
  * Refs ippoan/HealthConnectReaderWorker#60
  */
@@ -201,50 +203,59 @@ export async function ghapiExercisePointToRow(
   rawKey: string,
   uploadedAt: string,
 ): Promise<WorkoutRow | null> {
-  const startMs = (point as { startTimeMillis?: unknown }).startTimeMillis;
-  const endMs = (point as { endTimeMillis?: unknown }).endTimeMillis;
-  if (typeof startMs !== "number" || typeof endMs !== "number") return null;
+  const exercise = (point as { exercise?: unknown }).exercise;
+  if (!exercise || typeof exercise !== "object") return null;
+  const ex = exercise as {
+    interval?: { startTime?: unknown; endTime?: unknown };
+    exerciseType?: unknown;
+    displayName?: unknown;
+    metricsSummary?: Record<string, unknown>;
+  };
+  const startStr = ex.interval?.startTime;
+  const endStr = ex.interval?.endTime;
+  if (typeof startStr !== "string" || typeof endStr !== "string") return null;
+  const startMs = Date.parse(startStr);
+  const endMs = Date.parse(endStr);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
   if (!(endMs > startMs)) return null;
   const startAt = new Date(startMs).toISOString();
   const endAt = new Date(endMs).toISOString();
-  const value =
-    (point as { value?: unknown }).value &&
-    typeof (point as { value?: unknown }).value === "object"
-      ? ((point as { value: Record<string, unknown> }).value)
-      : {};
-  const dataPointId =
-    typeof (point as { id?: unknown }).id === "string"
-      ? (point as { id: string }).id
-      : `${startMs}:${endMs}`;
+
+  const name = (point as { name?: unknown }).name;
+  const dataPointId = typeof name === "string" && name ? name : `${startMs}:${endMs}`;
   const id = await ghapiPointId(dataPointId);
-  const activity = value.activityType;
+
+  const ms = ex.metricsSummary ?? {};
+  const distanceMm = ms.distanceMillimeters;
+  const calories = ms.caloriesKcal;
+  const steps = ms.steps;
+  const avgHr = ms.averageHeartRateBeatsPerMinute;
+  const minHr = ms.minHeartRateBeatsPerMinute;
+  const maxHr = ms.maxHeartRateBeatsPerMinute;
+
+  const displayName = ex.displayName;
+  const exerciseType = ex.exerciseType;
+  const activityName =
+    typeof displayName === "string" && displayName
+      ? displayName
+      : typeof exerciseType === "string"
+        ? exerciseType
+        : null;
+
   return {
     id,
     source: "ghapi",
     date: startAt.slice(0, 10),
     start_at: startAt,
     end_at: endAt,
-    activity_name: typeof activity === "string" ? activity : null,
-    distance_m:
-      typeof value.distanceMeters === "number" ? value.distanceMeters : null,
+    activity_name: activityName,
+    distance_m: typeof distanceMm === "number" ? distanceMm / 1000 : null,
     duration_sec: Math.round((endMs - startMs) / 1000),
-    active_calories:
-      typeof value.activeKilocalories === "number"
-        ? value.activeKilocalories
-        : null,
-    steps: typeof value.steps === "number" ? Math.round(value.steps) : null,
-    avg_heart_rate:
-      typeof value.averageHeartRate === "number"
-        ? Math.round(value.averageHeartRate)
-        : null,
-    min_heart_rate:
-      typeof value.minHeartRate === "number"
-        ? Math.round(value.minHeartRate)
-        : null,
-    max_heart_rate:
-      typeof value.maxHeartRate === "number"
-        ? Math.round(value.maxHeartRate)
-        : null,
+    active_calories: typeof calories === "number" ? calories : null,
+    steps: typeof steps === "number" ? Math.round(steps) : null,
+    avg_heart_rate: typeof avgHr === "number" ? Math.round(avgHr) : null,
+    min_heart_rate: typeof minHr === "number" ? Math.round(minHr) : null,
+    max_heart_rate: typeof maxHr === "number" ? Math.round(maxHr) : null,
     raw_key: rawKey,
     uploaded_at: uploadedAt,
   };

@@ -1985,21 +1985,25 @@ describe("POST /_admin/migrate", () => {
 });
 
 describe("ghapi (Google Health API)", () => {
-  it("ghapiExercisePointToRow maps a representative Exercise data point", async () => {
+  it("ghapiExercisePointToRow maps a representative exercise dataPoint (Health API v4)", async () => {
     const { ghapiExercisePointToRow } = await import("../src/db");
     const point = {
-      id: "dp-1234",
-      startTimeMillis: Date.UTC(2026, 4, 27, 0, 0, 0),
-      endTimeMillis: Date.UTC(2026, 4, 27, 0, 30, 0),
-      dataType: "Exercise",
-      value: {
-        activityType: "Running",
-        distanceMeters: 5230.5,
-        activeKilocalories: 320,
-        steps: 5400,
-        averageHeartRate: 152,
-        minHeartRate: 110,
-        maxHeartRate: 178,
+      name: "users/me/dataTypes/exercise/dataPoints/dp-1234",
+      exercise: {
+        interval: {
+          startTime: "2026-05-27T00:00:00Z",
+          endTime: "2026-05-27T00:30:00Z",
+        },
+        exerciseType: "RUNNING",
+        displayName: "Morning run",
+        metricsSummary: {
+          caloriesKcal: 320,
+          distanceMillimeters: 5230500,
+          averageHeartRateBeatsPerMinute: 152,
+          minHeartRateBeatsPerMinute: 110,
+          maxHeartRateBeatsPerMinute: 178,
+          steps: 5400,
+        },
       },
     };
     const row = await ghapiExercisePointToRow(
@@ -2010,13 +2014,15 @@ describe("ghapi (Google Health API)", () => {
     expect(row).not.toBeNull();
     expect(row?.source).toBe("ghapi");
     expect(row?.date).toBe("2026-05-27");
-    expect(row?.activity_name).toBe("Running");
+    expect(row?.activity_name).toBe("Morning run");
     expect(row?.distance_m).toBe(5230.5);
     expect(row?.duration_sec).toBe(30 * 60);
+    expect(row?.active_calories).toBe(320);
+    expect(row?.steps).toBe(5400);
     expect(row?.avg_heart_rate).toBe(152);
     expect(row?.min_heart_rate).toBe(110);
     expect(row?.max_heart_rate).toBe(178);
-    // id は安定 (同じ dataPoint id を投げると同じ row id)
+    // id は安定 (同じ dataPoint name を投げると同じ row id)
     const row2 = await ghapiExercisePointToRow(
       point,
       "ghapi/Exercise/2026/05-27.json",
@@ -2025,14 +2031,42 @@ describe("ghapi (Google Health API)", () => {
     expect(row2?.id).toBe(row?.id);
   });
 
-  it("ghapiExercisePointToRow returns null for invalid time fields", async () => {
+  it("ghapiExercisePointToRow falls back to exerciseType when displayName missing", async () => {
+    const { ghapiExercisePointToRow } = await import("../src/db");
+    const row = await ghapiExercisePointToRow(
+      {
+        name: "users/me/dataTypes/exercise/dataPoints/dp-no-name",
+        exercise: {
+          interval: {
+            startTime: "2026-05-01T01:00:00Z",
+            endTime: "2026-05-01T01:20:00Z",
+          },
+          exerciseType: "WALKING",
+        },
+      },
+      "ghapi/Exercise/2026/05-01.json",
+      "2026-05-01T01:20:00Z",
+    );
+    expect(row?.activity_name).toBe("WALKING");
+    expect(row?.distance_m).toBeNull();
+  });
+
+  it("ghapiExercisePointToRow returns null for invalid / missing exercise fields", async () => {
     const { ghapiExercisePointToRow } = await import("../src/db");
     expect(
       await ghapiExercisePointToRow({}, "k", "2026-01-01T00:00:00Z"),
     ).toBeNull();
+    // end <= start
     expect(
       await ghapiExercisePointToRow(
-        { startTimeMillis: 100, endTimeMillis: 50 },
+        {
+          exercise: {
+            interval: {
+              startTime: "2026-05-01T02:00:00Z",
+              endTime: "2026-05-01T01:00:00Z",
+            },
+          },
+        },
         "k",
         "2026-01-01T00:00:00Z",
       ),
@@ -2043,10 +2077,15 @@ describe("ghapi (Google Health API)", () => {
     const { ghapiExercisePointToRow, upsertWorkout } = await import("../src/db");
     const row = await ghapiExercisePointToRow(
       {
-        id: "dp-smoke-ghapi",
-        startTimeMillis: Date.UTC(2026, 4, 1, 1, 0, 0),
-        endTimeMillis: Date.UTC(2026, 4, 1, 1, 20, 0),
-        value: { activityType: "Walking", distanceMeters: 1200 },
+        name: "users/me/dataTypes/exercise/dataPoints/dp-smoke-ghapi",
+        exercise: {
+          interval: {
+            startTime: "2026-05-01T01:00:00Z",
+            endTime: "2026-05-01T01:20:00Z",
+          },
+          displayName: "Walking",
+          metricsSummary: { distanceMillimeters: 1200000 },
+        },
       },
       "ghapi/Exercise/2026/05-01.json",
       "2026-05-01T01:20:00Z",
@@ -2074,10 +2113,15 @@ describe("ghapi (Google Health API)", () => {
       [{ startTimeMillis: start, endTimeMillis: end }],
       [
         {
-          id: "dp-backfill-1",
-          startTimeMillis: start,
-          endTimeMillis: end,
-          value: { activityType: "Running", distanceMeters: 4200 },
+          name: "users/me/dataTypes/exercise/dataPoints/dp-backfill-1",
+          exercise: {
+            interval: {
+              startTime: new Date(start).toISOString(),
+              endTime: new Date(end).toISOString(),
+            },
+            displayName: "Running",
+            metricsSummary: { distanceMillimeters: 4200000 },
+          },
         },
       ],
     );

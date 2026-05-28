@@ -26,12 +26,47 @@ export interface GhapiWebhookPayload {
   };
 }
 
+/**
+ * Google Health API v4 `exercise` dataPoint。
+ * `GET /v4/users/me/dataTypes/exercise/dataPoints` のレスポンス要素。
+ *
+ *   {
+ *     "name": "users/me/dataTypes/exercise/dataPoints/<id>",
+ *     "exercise": {
+ *       "interval": { "startTime": "<RFC3339>", "endTime": "<RFC3339>", ... },
+ *       "activeDuration": "1234s",
+ *       "exerciseType": "RUNNING",
+ *       "displayName": "...",
+ *       "metricsSummary": {
+ *         "caloriesKcal": 320,
+ *         "distanceMillimeters": 5230500,
+ *         "averageHeartRateBeatsPerMinute": 152,
+ *         "minHeartRateBeatsPerMinute": 110,
+ *         "maxHeartRateBeatsPerMinute": 178,
+ *         "steps": 5400
+ *       }
+ *     }
+ *   }
+ */
 export interface GhapiDataPoint {
-  id?: string;
-  startTimeMillis?: number;
-  endTimeMillis?: number;
-  dataType?: string;
-  value?: Record<string, unknown>;
+  name?: string;
+  exercise?: {
+    interval?: {
+      startTime?: string;
+      endTime?: string;
+    };
+    activeDuration?: string;
+    exerciseType?: string;
+    displayName?: string;
+    metricsSummary?: {
+      caloriesKcal?: number;
+      distanceMillimeters?: number;
+      averageHeartRateBeatsPerMinute?: number;
+      minHeartRateBeatsPerMinute?: number;
+      maxHeartRateBeatsPerMinute?: number;
+      steps?: number;
+    };
+  };
 }
 
 export interface RefreshedToken {
@@ -80,9 +115,18 @@ export async function revokeToken(
 }
 
 /**
- * 指定 intervals[] 範囲の Exercise data points を全て取得。
- * Google Health の `dataPoints:list` は paginated でも実用上 1 webhook 通知
- * は分割されないことを想定して 1 page 取得のみ (将来 nextPageToken 対応)。
+ * 指定 intervals[] 範囲の exercise data points を取得。
+ *
+ * Google Health API v4:
+ *   `GET /v4/users/me/dataTypes/exercise/dataPoints?filter=<AIP-160>`
+ * filter は civil 日付で範囲指定する (AIP-160):
+ *   `exercise.interval.civil_start_time >= "2026-05-01" AND
+ *    exercise.interval.civil_start_time < "2026-05-02"`
+ * 各 interval の startTimeMillis / endTimeMillis を UTC 暦日に丸めて使う
+ * (backfill は UTC midnight 境界で 1 日ずつ渡す前提)。nextPageToken を辿って
+ * 全 page 取得する (pageSize 上限 10000)。
+ *
+ * scope: `googlehealth.activity_and_fitness(.readonly)` が必要。
  */
 export async function listExercisePoints(
   accessToken: string,
@@ -91,21 +135,30 @@ export async function listExercisePoints(
 ): Promise<GhapiDataPoint[]> {
   const out: GhapiDataPoint[] = [];
   for (const iv of intervals) {
-    const url =
-      `${GHAPI_DATA_BASE}/users/me/dataSources/Exercise/dataPoints:list` +
-      `?startTime=${encodeURIComponent(new Date(iv.startTimeMillis).toISOString())}` +
-      `&endTime=${encodeURIComponent(new Date(iv.endTimeMillis).toISOString())}`;
-    const resp = await fetchImpl(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      throw new Error(
-        `ghapi_list_failed:${resp.status}:${text.slice(0, 200)}`,
-      );
-    }
-    const j = (await resp.json()) as { dataPoints?: GhapiDataPoint[] };
-    if (Array.isArray(j.dataPoints)) out.push(...j.dataPoints);
+    const startDate = new Date(iv.startTimeMillis).toISOString().slice(0, 10);
+    const endDate = new Date(iv.endTimeMillis).toISOString().slice(0, 10);
+    const filter =
+      `exercise.interval.civil_start_time >= "${startDate}" AND ` +
+      `exercise.interval.civil_start_time < "${endDate}"`;
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({ pageSize: "1000", filter });
+      if (pageToken) params.set("pageToken", pageToken);
+      const url = `${GHAPI_DATA_BASE}/users/me/dataTypes/exercise/dataPoints?${params.toString()}`;
+      const resp = await fetchImpl(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`ghapi_list_failed:${resp.status}:${text.slice(0, 200)}`);
+      }
+      const j = (await resp.json()) as {
+        dataPoints?: GhapiDataPoint[];
+        nextPageToken?: string;
+      };
+      if (Array.isArray(j.dataPoints)) out.push(...j.dataPoints);
+      pageToken = j.nextPageToken;
+    } while (pageToken);
   }
   return out;
 }
