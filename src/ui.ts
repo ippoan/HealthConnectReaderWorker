@@ -1953,11 +1953,16 @@ function renderCompare(jA, jB) {
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
         hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
-        // 速度帯がチャート下部 (約 1/3) に収まるよう、軸上限を実測 max の ~3 倍に。
+        // 速度帯はチャート下部 (約 1/3) に収めるため軸上限を実測 max の ~3 倍にする。
+        // この上限は帯の位置決め用で実 km/h とはズレるので目盛り/グリッド/タイトル
+        // は隠す。実値は凡例 (例 "A: 10.0km/h") とツールチップで読める。
         speed: {
-          type: "linear", position: "left", title: { display: true, text: "km/h" },
+          type: "linear", position: "left",
           beginAtZero: true,
           max: maxSpeedVal > 0 ? Math.ceil((maxSpeedVal / 0.32) / 5) * 5 : undefined,
+          ticks: { display: false },
+          grid: { display: false },
+          title: { display: false },
         },
       },
       plugins: {
