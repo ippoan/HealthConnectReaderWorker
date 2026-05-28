@@ -1568,7 +1568,10 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
   </section>
   <section id="summary" class="bg-white rounded-2xl shadow p-4 text-sm text-slate-700">読込中…</section>
   <section class="bg-white rounded-2xl shadow p-4 space-y-2">
-    <h2 id="chart-title" class="font-semibold">心拍 + 速度</h2>
+    <div class="flex items-center justify-between gap-2">
+      <h2 id="chart-title" class="font-semibold">心拍 + 速度</h2>
+      <button id="export-json" type="button" class="hidden px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-[11px] shrink-0">JSON ↓</button>
+    </div>
     <p id="chart-help-single" class="text-[10px] text-slate-400">
       赤 = 心拍 (Fitbit, 右軸 bpm)。色帯 = 各 HC session の平均速度 (左軸 km/h) を
       期間で平坦表示。速度区間の境界で心拍が上下するかを確認できる。速度は HC、
@@ -1642,6 +1645,52 @@ async function fetchWorkout(wid) {
   });
   if (!r.ok) throw new Error("status " + r.status);
   return await r.json();
+}
+
+function downloadJson(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+}
+
+// チャートに描いている系列だけを抜き出す。凡例でトグルして非表示にした系列
+// (= isDatasetVisible false) は除外する。B のオフセットは x には焼き込まず、
+// 元の経過分 (_x0 があればそれ) を出し、offset は別フィールドで渡す。
+function chartSeries(chart) {
+  const out = [];
+  chart.data.datasets.forEach(function (ds, i) {
+    if (!chart.isDatasetVisible(i)) return;
+    const side = ds.label.indexOf("A:") === 0 ? "A" : (ds.label.indexOf("B:") === 0 ? "B" : null);
+    out.push({
+      label: ds.label,
+      side: side,
+      axis: ds.yAxisID === "speed" ? "speed_kmh" : "hr_bpm",
+      points: ds.data.map(function (p) {
+        const x = p._x0 !== undefined ? p._x0 : p.x;
+        return { x: Math.round(x * 1000) / 1000, y: p.y };
+      }),
+    });
+  });
+  return out;
+}
+
+// JSON ダウンロードボタンを有効化。meta = { filename, xAxis, extra, withOffset }。
+function setupExport(chart, meta) {
+  const btn = document.getElementById("export-json");
+  btn.classList.remove("hidden");
+  btn.onclick = function () {
+    const out = Object.assign({ x_axis: meta.xAxis }, meta.extra || {});
+    if (meta.withOffset) {
+      const off = document.getElementById("offset-range");
+      // side:"B" の系列に対して consumer 側で x += b_offset_min して使う。
+      out.b_offset_min = off ? (Number(off.value) || 0) : 0;
+    }
+    out.series = chartSeries(chart);
+    downloadJson(meta.filename, out);
+  };
 }
 
 // 比較相手 picker: 直近の ghapi workout を列挙して select に流す。
@@ -1744,7 +1793,7 @@ function renderSingle(j) {
     });
   });
 
-  new Chart(document.getElementById("hr-chart").getContext("2d"), {
+  const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",
     data: { datasets: datasets },
     options: {
@@ -1772,6 +1821,12 @@ function renderSingle(j) {
         },
       },
     },
+  });
+
+  setupExport(chart, {
+    filename: "ghapi-workout-" + (row.id || id) + ".json",
+    xAxis: "epoch_ms",
+    extra: { id: row.id, activity_name: row.activity_name, start_at: row.start_at },
   });
 }
 
@@ -1897,6 +1952,15 @@ function renderCompare(jA, jB) {
   });
 
   setupOffset(chart, bIdx);
+  setupExport(chart, {
+    filename: "ghapi-compare-" + (rowA.id || id) + "-vs-" + (rowB.id || id2) + ".json",
+    xAxis: "elapsed_minutes",
+    withOffset: true,
+    extra: {
+      a: { id: rowA.id, activity_name: rowA.activity_name, start_at: rowA.start_at },
+      b: { id: rowB.id, activity_name: rowB.activity_name, start_at: rowB.start_at },
+    },
+  });
 }
 
 // B 系列 (心拍 + 速度線) を時間軸方向に前後へずらすスライダー。
