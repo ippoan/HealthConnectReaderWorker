@@ -1912,14 +1912,16 @@ function renderCompare(jA, jB) {
       datasets.push({
         label: tag + ": " + v.toFixed(1) + "km/h",
         data: [{ x: elapsedMin(s, start), y: v }, { x: elapsedMin(e, start), y: v }],
-        yAxisID: "speed", borderColor: color, borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false,
+        yAxisID: "speed", borderColor: color, borderWidth: 4, borderDash: [10, 6],
+        borderCapStyle: "round", pointRadius: 0, fill: false,
       });
       return datasets.length - 1;
     });
   };
-  pushSpeed(jA, startA, "#fb7185", "A");
+  // 速度線は太く濃い色で心拍 (A=赤 / B=空色) と差別化する。
+  pushSpeed(jA, startA, "#ea580c", "A");
   const beforeB = datasets.length;
-  pushSpeed(jB, startB, "#38bdf8", "B");
+  pushSpeed(jB, startB, "#1d4ed8", "B");
   for (let k = beforeB; k < datasets.length; k++) bIdx.push(k);
 
   // workout 実時間 (HR サンプルが途中までしか無くても軸を伸ばすため)。
