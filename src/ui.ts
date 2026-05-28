@@ -168,6 +168,21 @@ export const INDEX_HTML = `<!doctype html>
         切断
       </button>
     </div>
+    <div id="ghapi-backfill-row" class="flex gap-2 items-center hidden">
+      <select id="ghapi-backfill-days"
+        class="text-sm border border-slate-300 rounded-lg px-2 py-2 bg-white">
+        <option value="7">過去 1 週間</option>
+        <option value="30" selected>過去 1 か月</option>
+        <option value="90">過去 3 か月</option>
+        <option value="180">過去 6 か月</option>
+        <option value="365">過去 1 年</option>
+      </select>
+      <button id="ghapi-backfill-btn"
+        class="flex-1 bg-sky-600 text-white text-sm font-semibold py-2 rounded-lg active:bg-sky-700">
+        取込
+      </button>
+    </div>
+    <p id="ghapi-backfill-status" class="text-xs text-slate-500 min-h-[1rem]"></p>
     <ul id="ghapi-recent" class="text-xs text-slate-600 divide-y divide-slate-100"></ul>
   </section>
 
@@ -642,6 +657,7 @@ async function refreshGhapiStatus() {
     connectBtn.disabled = true;
     return;
   }
+  const backfillRow = $("ghapi-backfill-row");
   if (j.connected) {
     const last = j.last_event_at
       ? new Date(j.last_event_at).toLocaleString()
@@ -651,10 +667,12 @@ async function refreshGhapiStatus() {
       "…) / 直近 event " + last + " / 取込済 " + (j.recent_count ?? 0) + " 件";
     connectBtn.classList.add("hidden");
     disconnectBtn.classList.remove("hidden");
+    backfillRow.classList.remove("hidden");
   } else {
     statusEl.textContent = "未接続";
     connectBtn.classList.remove("hidden");
     disconnectBtn.classList.add("hidden");
+    backfillRow.classList.add("hidden");
   }
   const rows = Array.isArray(j.recent) ? j.recent : [];
   if (rows.length === 0) {
@@ -685,6 +703,39 @@ async function ghapiDisconnect() {
   refreshGhapiStatus().catch(() => {});
 }
 
+async function ghapiBackfill() {
+  const btn = $("ghapi-backfill-btn");
+  const statusEl = $("ghapi-backfill-status");
+  const daysSel = $("ghapi-backfill-days");
+  const days = Number(daysSel.value) || 30;
+  btn.disabled = true;
+  statusEl.textContent = "取込中… (過去 " + days + " 日)";
+  try {
+    const r = await fetch(
+      "/api/ghapi/backfill",
+      authFetchInit({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days }),
+      }),
+    );
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      statusEl.textContent = "取込失敗 (" + r.status + " " + (j.error || "") + ")";
+      return;
+    }
+    statusEl.textContent =
+      "取込完了: " + (j.indexed ?? 0) + " 件 (取得 " + (j.fetched ?? 0) + " 点" +
+      (j.errors ? " / エラー " + j.errors + " 日" : "") + ")";
+    await refreshGhapiStatus().catch(() => {});
+    await refreshWorkouts().catch(() => {});
+  } catch (e) {
+    statusEl.textContent = "取込失敗: " + String(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   $("env-badge").textContent = hasNative ? "native bridge: ✓" : "PWA / preview";
   $("upload-btn").addEventListener("click", uploadNow);
@@ -701,6 +752,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("reindex-btn").addEventListener("click", reindexAll);
   $("ghapi-connect-btn").addEventListener("click", ghapiConnect);
   $("ghapi-disconnect-btn").addEventListener("click", ghapiDisconnect);
+  $("ghapi-backfill-btn").addEventListener("click", ghapiBackfill);
   refreshHistory().catch(() => {});
   refreshZonesList().catch(() => {});
   refreshWorkouts().catch(() => {});

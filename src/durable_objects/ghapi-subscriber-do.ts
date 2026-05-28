@@ -35,7 +35,7 @@ import {
   type GhapiDataPoint,
   type GhapiWebhookPayload,
 } from "../ghapi";
-import { ghapiExercisePointToRow, upsertWorkout } from "../db";
+import { ingestExercisePoints } from "../ghapi-ingest";
 
 interface DOEnv {
   R2: R2Bucket;
@@ -67,6 +67,9 @@ export class GhapiSubscriberDO {
     }
     if (req.method === "POST" && url.pathname === "/webhook") {
       return this.handleWebhook(req);
+    }
+    if (req.method === "POST" && url.pathname === "/backfill") {
+      return this.handleBackfill(req);
     }
     if (req.method === "POST" && url.pathname === "/disconnect") {
       return this.handleDisconnect();
@@ -170,49 +173,96 @@ export class GhapiSubscriberDO {
       }
     }
 
-    // R2 PUT: ghapi/{dataType}/{yyyy}/{mm-dd}.json (intervals[0] の startTime 基準)
-    const firstStart = new Date(intervals[0].startTimeMillis);
-    const yyyy = String(firstStart.getUTCFullYear()).padStart(4, "0");
-    const mm = String(firstStart.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(firstStart.getUTCDate()).padStart(2, "0");
-    const rawKey = `ghapi/${dataType}/${yyyy}/${mm}-${dd}.json`;
-    const body = JSON.stringify({
+    const { indexed } = await ingestExercisePoints(
+      this.env.R2,
+      this.env.DB,
       dataType,
-      receivedAt: new Date().toISOString(),
       intervals,
       points,
-    });
-    try {
-      await this.env.R2.put(rawKey, body, {
-        httpMetadata: { contentType: "application/json" },
-      });
-    } catch (e) {
-      console.error("ghapi_r2_put_failed", { error: String(e), rawKey });
-    }
-
-    // D1 upsert (Exercise dataType のみ)
-    let indexed = 0;
-    if (dataType === "Exercise" && points.length > 0) {
-      const uploadedAt = new Date().toISOString();
-      for (const p of points) {
-        const row = await ghapiExercisePointToRow(
-          p as Record<string, unknown>,
-          rawKey,
-          uploadedAt,
-        );
-        if (row === null) continue;
-        try {
-          await upsertWorkout(this.env.DB, row);
-          indexed++;
-        } catch (e) {
-          console.warn("ghapi_upsert_failed", { error: String(e), id: row.id });
-        }
-      }
-    }
+    );
 
     await this.state.storage.put({
       [K_LAST_EVENT_AT]: Date.now(),
       [K_LAST_EVENT_SUMMARY]: `${dataType}:${points.length} points, ${indexed} indexed`,
+    });
+  }
+
+  // ---------- /backfill ----------
+
+  /**
+   * polling backfill: webhook を待たず、過去 `days` 日分の Exercise data point
+   * を 1 日ずつ `dataPoints:list` で取得して R2/D1 に取り込む。
+   *
+   * Google Health の webhook subscription endpoint が "coming soon" のため
+   * (= `createSubscription` が stub)、当面はこの手動 backfill が唯一の取込経路。
+   *
+   * body: `{ days?: number }` (default 30、1〜365 に clamp)。
+   * UTC の暦日ごとに interval を切る (R2 key の `{mm-dd}` が 1 日 1 ファイルに
+   * なるよう `ingestExercisePoints` に 1 日分ずつ渡す)。
+   */
+  private async handleBackfill(req: Request): Promise<Response> {
+    let days = 30;
+    try {
+      const body = (await req.json()) as { days?: unknown };
+      if (typeof body.days === "number" && Number.isFinite(body.days)) {
+        days = Math.floor(body.days);
+      }
+    } catch {
+      // body 無し / 不正 → default 30
+    }
+    days = Math.max(1, Math.min(365, days));
+
+    const refresh = await this.state.storage.get<string>(K_REFRESH);
+    if (!refresh) return json(409, { error: "not_connected" });
+
+    let accessToken: string;
+    try {
+      accessToken = (await this.refresh()).access_token;
+    } catch (e) {
+      console.error("ghapi_refresh_failed_on_backfill", { error: String(e) });
+      return json(502, { error: "refresh_failed" });
+    }
+
+    const DAY_MS = 86_400_000;
+    const now = Date.now();
+    let totalFetched = 0;
+    let totalIndexed = 0;
+    const errors: string[] = [];
+
+    for (let i = 0; i < days; i++) {
+      const dayStart = now - (i + 1) * DAY_MS;
+      const dayEnd = now - i * DAY_MS;
+      const interval = { startTimeMillis: dayStart, endTimeMillis: dayEnd };
+      let points: GhapiDataPoint[];
+      try {
+        points = await listExercisePoints(accessToken, [interval]);
+      } catch (e) {
+        errors.push(String(e));
+        continue;
+      }
+      if (points.length === 0) continue;
+      const { indexed } = await ingestExercisePoints(
+        this.env.R2,
+        this.env.DB,
+        "Exercise",
+        [interval],
+        points,
+      );
+      totalFetched += points.length;
+      totalIndexed += indexed;
+    }
+
+    await this.state.storage.put({
+      [K_LAST_EVENT_AT]: Date.now(),
+      [K_LAST_EVENT_SUMMARY]: `backfill ${days}d: ${totalFetched} points, ${totalIndexed} indexed`,
+    });
+
+    return json(200, {
+      ok: true,
+      days,
+      fetched: totalFetched,
+      indexed: totalIndexed,
+      errors: errors.length,
     });
   }
 
