@@ -1922,6 +1922,18 @@ function renderCompare(jA, jB) {
   pushSpeed(jB, startB, "#38bdf8", "B");
   for (let k = beforeB; k < datasets.length; k++) bIdx.push(k);
 
+  // x 軸の範囲を「長い方の workout 全体」に固定する。HR サンプルが workout 途中
+  // までしか無い場合でも、各 workout の実時間 (duration) と全系列の端点まで軸を
+  // 伸ばし、心拍が短くても速度区間や経過後半が切れないようにする。
+  const xCandMax = [], xCandMin = [0];
+  if (rowA.duration_sec) xCandMax.push(Number(rowA.duration_sec) / 60);
+  if (rowB.duration_sec) xCandMax.push(Number(rowB.duration_sec) / 60);
+  datasets.forEach(function (ds) {
+    ds.data.forEach(function (p) { xCandMax.push(p.x); xCandMin.push(p.x); });
+  });
+  const xMax = Math.max.apply(null, xCandMax);
+  const xMin = Math.min.apply(null, xCandMin);
+
   const chart = new Chart(document.getElementById("hr-chart").getContext("2d"), {
     type: "line",
     data: { datasets: datasets },
@@ -1931,6 +1943,7 @@ function renderCompare(jA, jB) {
       scales: {
         x: {
           type: "linear",
+          min: xMin, max: xMax,
           title: { display: true, text: "経過 (分)" },
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
