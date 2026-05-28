@@ -1579,7 +1579,7 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
     </p>
     <p id="chart-help-compare" class="text-[10px] text-slate-400 hidden">
       横軸 = 各 workout の開始からの経過 (分)。2 件の心拍 (実線, 右軸 bpm) を
-      経過時間で揃えて重ね、波形を比較できる。破線 = 各 workout の平均速度 (左軸 km/h)。
+      経過時間で揃えて重ね、波形を比較できる。下の塗り帯 = 各 workout の平均速度 (左軸 km/h)。
     </p>
     <p id="chart-empty" class="text-xs text-slate-500 hidden">心拍データ無し</p>
     <div id="offset-ctrl" class="hidden items-center gap-2 text-[12px] pt-1">
@@ -1900,8 +1900,10 @@ function renderCompare(jA, jB) {
     });
     bIdx.push(datasets.length - 1);
   }
-  // 速度は各 workout の突合 HC session を平坦線で重ねる (単一ビューと同じ流儀)。
-  const pushSpeed = function (j, start, color, tag) {
+  // 速度は各 workout の突合 HC session を「下部の塗り速度帯」として重ねる。
+  // 実線 + 0 まで塗り (fill) で、心拍の下に帯として出す。
+  let maxSpeedVal = 0;
+  const pushSpeed = function (j, start, color, bg, tag) {
     const sess = Array.isArray(j.hc_sessions) ? j.hc_sessions : [];
     sess.forEach(function (w) {
       if (w.distance_m == null || !w.duration_sec) return;
@@ -1909,19 +1911,20 @@ function renderCompare(jA, jB) {
       const e = w.end_at ? Date.parse(w.end_at) : null;
       if (s == null || e == null || start == null) return;
       const v = (Number(w.distance_m) / 1000) / (Number(w.duration_sec) / 3600);
+      if (v > maxSpeedVal) maxSpeedVal = v;
       datasets.push({
         label: tag + ": " + v.toFixed(1) + "km/h",
         data: [{ x: elapsedMin(s, start), y: v }, { x: elapsedMin(e, start), y: v }],
-        yAxisID: "speed", borderColor: color, borderWidth: 4, borderDash: [10, 6],
-        borderCapStyle: "round", pointRadius: 0, fill: false,
+        yAxisID: "speed", borderColor: color, backgroundColor: bg, borderWidth: 2.5,
+        borderCapStyle: "round", pointRadius: 0, fill: true,
       });
       return datasets.length - 1;
     });
   };
-  // 速度線は太く濃い色で心拍 (A=赤 / B=空色) と差別化する。
-  pushSpeed(jA, startA, "#ea580c", "A");
+  // 速度帯は濃い実線 + 半透明塗りで心拍 (A=赤 / B=空色) と差別化する。
+  pushSpeed(jA, startA, "#ea580c", "rgba(234,88,12,0.20)", "A");
   const beforeB = datasets.length;
-  pushSpeed(jB, startB, "#1d4ed8", "B");
+  pushSpeed(jB, startB, "#1d4ed8", "rgba(29,78,216,0.20)", "B");
   for (let k = beforeB; k < datasets.length; k++) bIdx.push(k);
 
   // workout 実時間 (HR サンプルが途中までしか無くても軸を伸ばすため)。
@@ -1950,7 +1953,12 @@ function renderCompare(jA, jB) {
           ticks: { callback: function (v) { return Math.round(v) + "分"; }, maxTicksLimit: 8 },
         },
         hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
-        speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
+        // 速度帯がチャート下部 (約 1/3) に収まるよう、軸上限を実測 max の ~3 倍に。
+        speed: {
+          type: "linear", position: "left", title: { display: true, text: "km/h" },
+          beginAtZero: true,
+          max: maxSpeedVal > 0 ? Math.ceil((maxSpeedVal / 0.32) / 5) * 5 : undefined,
+        },
       },
       plugins: {
         legend: {
