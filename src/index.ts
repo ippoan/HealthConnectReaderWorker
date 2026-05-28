@@ -938,14 +938,14 @@ app.get("/api/ghapi/status", apiAuth, async (c) => {
 /**
  * `POST /api/ghapi/backfill` — webhook を待たず過去 N 日分の Exercise を取込む。
  *
- * body: `{ days?: number, force?: boolean }` (default 30、force 無しは差分取込)。
+ * body: `{ days?: number, force?: boolean }` (default 3、force 無しは差分取込)。
  * cookie / Bearer auth (`apiAuth`)。DO の `/backfill` に forward して結果を返す。
  */
 app.post("/api/ghapi/backfill", apiAuth, async (c) => {
   const stub = getGhapiStub(c.env);
   if (!stub) return c.json({ error: "ghapi_do_not_bound" }, 500);
 
-  let days = 30;
+  let days = 3;
   let force = false;
   try {
     const body = (await c.req.json()) as { days?: unknown; force?: unknown };

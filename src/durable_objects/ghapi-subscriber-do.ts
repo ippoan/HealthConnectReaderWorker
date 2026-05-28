@@ -205,7 +205,7 @@ export class GhapiSubscriberDO {
    * Google Health の webhook subscription endpoint が "coming soon" のため
    * (= `createSubscription` が stub)、当面はこの手動 backfill が唯一の取込経路。
    *
-   * body: `{ days?: number, force?: boolean }` (days は default 30、1〜365 に clamp)。
+   * body: `{ days?: number, force?: boolean }` (days は default 3、1〜365 に clamp)。
    * JST の暦日ごとに interval を切る (civil_start_time filter が端末ローカル=JST
    * 暦日なため。R2 key の `{mm-dd}` も JST で 1 日 1 ファイルに揃う)。Refs #85
    *
@@ -214,7 +214,7 @@ export class GhapiSubscriberDO {
    * stable id upsert なので冪等)。`force: true` で N 日全件を強制再取込。
    */
   private async handleBackfill(req: Request): Promise<Response> {
-    let days = 30;
+    let days = 3;
     let force = false;
     try {
       const body = (await req.json()) as { days?: unknown; force?: unknown };
