@@ -1964,7 +1964,7 @@ function renderCompare(jA, jB) {
     },
   });
 
-  setupOffset(chart, bIdx);
+  setupOffset(chart, bIdx, xMin, xMax);
   setupExport(chart, {
     filename: "ghapi-compare-" + (rowA.id || id) + "-vs-" + (rowB.id || id2) + ".json",
     xAxis: "elapsed_minutes",
@@ -1978,13 +1978,17 @@ function renderCompare(jA, jB) {
 
 // B 系列 (心拍 + 速度線) を時間軸方向に前後へずらすスライダー。
 // A と山が揃うよう手動補正する用途。元の x を保持して都度再計算する。
-function setupOffset(chart, bIdx) {
+function setupOffset(chart, bIdx, xMin, xMax) {
   if (!bIdx.length) return;
   const ctrl = document.getElementById("offset-ctrl");
   const range = document.getElementById("offset-range");
   const valEl = document.getElementById("offset-val");
   ctrl.classList.remove("hidden");
   ctrl.classList.add("flex");
+  // スライダーの可動域をチャート全幅に合わせる (±30 固定だと長い workout の
+  // 後半まで B を寄せられない)。
+  range.min = String(Math.floor(xMin));
+  range.max = String(Math.ceil(xMax));
   // 各 B dataset の元 x を退避。
   bIdx.forEach(function (di) {
     chart.data.datasets[di].data.forEach(function (pt) { pt._x0 = pt.x; });
@@ -1992,9 +1996,17 @@ function setupOffset(chart, bIdx) {
   const apply = function (off) {
     const o = Number(off) || 0;
     valEl.textContent = (o > 0 ? "+" : "") + o.toFixed(1) + " 分";
+    let lo = xMin, hi = xMax;
     bIdx.forEach(function (di) {
-      chart.data.datasets[di].data.forEach(function (pt) { pt.x = pt._x0 + o; });
+      chart.data.datasets[di].data.forEach(function (pt) {
+        pt.x = pt._x0 + o;
+        if (pt.x < lo) lo = pt.x;
+        if (pt.x > hi) hi = pt.x;
+      });
     });
+    // ずらした B が軸外に出ないよう、必要なら軸を広げる (基準範囲は縮めない)。
+    chart.options.scales.x.min = lo;
+    chart.options.scales.x.max = hi;
     chart.update("none");
   };
   range.addEventListener("input", function () { apply(range.value); });
