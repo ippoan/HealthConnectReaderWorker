@@ -1798,6 +1798,21 @@ function hrAxisBounds(samples) {
   return { min: Math.max(0, Math.floor((lo - 8) / 5) * 5), max: Math.ceil((hi + 8) / 5) * 5 };
 }
 
+// 速度 (speed) 軸の max を「**表示中** (凡例 ON) の speed 系列の最大 ×1.25」で
+// 設定する。凡例で最大速度の系列を消したら、残った系列に合わせて軸が縮み
+// マージンが取り直される (= 固定ではなくフィルター後最大に追従)。min は 0 固定。
+// Refs ippoan/HealthConnectReader#6
+function applySpeedMax(chart) {
+  var mx = 0;
+  chart.data.datasets.forEach(function (ds, i) {
+    if (ds.yAxisID !== "speed") return;
+    if (!chart.isDatasetVisible(i)) return;
+    ds.data.forEach(function (p) { if (p && typeof p.y === "number" && p.y > mx) mx = p.y; });
+  });
+  chart.options.scales.speed.min = 0;
+  chart.options.scales.speed.max = Math.max(1, Math.ceil(mx * 1.25));
+}
+
 function renderSingle(j) {
   const summaryEl = document.getElementById("summary");
   const row = j.row || {};
@@ -1880,7 +1895,15 @@ function renderSingle(j) {
         speed: { type: "linear", position: "left", min: 0, max: speedMax, title: { display: true, text: "km/h" } },
       },
       plugins: {
-        legend: { labels: { boxWidth: 12, font: { size: 10 } } },
+        legend: {
+          labels: { boxWidth: 12, font: { size: 10 } },
+          // 凡例トグル後、表示中の speed 系列の最大に合わせて速度軸を取り直す。
+          onClick: function (e, item, legend) {
+            Chart.defaults.plugins.legend.onClick.call(this, e, item, legend);
+            applySpeedMax(legend.chart);
+            legend.chart.update();
+          },
+        },
         tooltip: {
           callbacks: {
             // x は epoch ms。tooltip 見出しを時刻表示に整形する
@@ -1894,6 +1917,8 @@ function renderSingle(j) {
       },
     },
   });
+  applySpeedMax(chart);
+  chart.update("none");
 
   setupExport(chart, {
     filename: "ghapi-workout-" + (row.id || id) + ".json",
@@ -2033,10 +2058,11 @@ function renderCompare(jA, jB) {
       plugins: {
         legend: {
           labels: { boxWidth: 12, font: { size: 10 } },
-          // 非表示にした系列を軸計算から外すため、トグル後に x 軸を引き直す。
+          // 非表示にした系列を軸計算から外すため、トグル後に x 軸 + 速度軸を引き直す。
           onClick: function (e, item, legend) {
             Chart.defaults.plugins.legend.onClick.call(this, e, item, legend);
             refitX();
+            applySpeedMax(legend.chart);
             legend.chart.update();
           },
         },
@@ -2073,6 +2099,7 @@ function renderCompare(jA, jB) {
     chart.options.scales.x.max = hi;
   }
   refitX();
+  applySpeedMax(chart);
   chart.update("none");
 
   setupOffset(chart, bIdx, sliderMin, sliderMax, function (o) { state.offset = o; refitX(); });
