@@ -1682,7 +1682,19 @@ async function load() {
         hr: { type: "linear", position: "right", title: { display: true, text: "bpm" } },
         speed: { type: "linear", position: "left", title: { display: true, text: "km/h" }, beginAtZero: true },
       },
-      plugins: { legend: { labels: { boxWidth: 12, font: { size: 10 } } } },
+      plugins: {
+        legend: { labels: { boxWidth: 12, font: { size: 10 } } },
+        tooltip: {
+          callbacks: {
+            // x は epoch ms。tooltip 見出しを時刻表示に整形する
+            // (既定だと生の 1779914387000 がそのまま出る)。
+            title: function (items) {
+              if (!items || !items.length) return "";
+              return fmtClock(items[0].parsed.x);
+            },
+          },
+        },
+      },
     },
   });
 }
