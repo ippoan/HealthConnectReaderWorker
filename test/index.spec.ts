@@ -1429,6 +1429,37 @@ describe("groupAndMatch", () => {
     const out = groupAndMatch(rows);
     expect(out[0].date).toBe("2026-05-01");
   });
+
+  it("emits ghapi rows as standalone ghapi_only items (not matched with hc/zones)", () => {
+    const rows: WorkoutRow[] = [
+      {
+        id: "hc1", source: "hc", date: "2026-05-10",
+        start_at: "2026-05-10T08:00:00Z", end_at: "2026-05-10T08:30:00Z",
+        activity_name: "トレッドミル", distance_m: 5000, duration_sec: 1800,
+        active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
+        raw_key: "k1", uploaded_at: "x",
+      },
+      {
+        id: "gh1", source: "ghapi", date: "2026-05-10",
+        // hc1 と時刻 overlap するが突合せず ghapi_only のまま出る
+        start_at: "2026-05-10T08:05:00Z", end_at: "2026-05-10T08:25:00Z",
+        activity_name: "Morning run", distance_m: 4800, duration_sec: 1200,
+        active_calories: 300, steps: 4500, avg_heart_rate: 150, min_heart_rate: 100, max_heart_rate: 175,
+        raw_key: "k2", uploaded_at: "x",
+      },
+    ];
+    const out = groupAndMatch(rows);
+    const may10 = out.find((d) => d.date === "2026-05-10")!;
+    expect(may10.hc_count).toBe(1);
+    expect(may10.ghapi_count).toBe(1);
+    expect(may10.matched_count).toBe(0); // ghapi は HC と突合しない
+    const ghItem = may10.items.find((it) => it.type === "ghapi_only");
+    expect(ghItem).toBeDefined();
+    if (ghItem && ghItem.type === "ghapi_only") {
+      expect(ghItem.ghapi.id).toBe("gh1");
+      expect(ghItem.ghapi.activity_name).toBe("Morning run");
+    }
+  });
 });
 
 describe("POST /_admin/reindex", () => {
