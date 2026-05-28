@@ -181,6 +181,10 @@ export const INDEX_HTML = `<!doctype html>
         class="flex-1 bg-sky-600 text-white text-sm font-semibold py-2 rounded-lg active:bg-sky-700">
         取込
       </button>
+      <label class="flex items-center gap-1 text-xs text-slate-600 whitespace-nowrap">
+        <input id="ghapi-backfill-force" type="checkbox" class="align-middle">
+        強制全件
+      </label>
     </div>
     <p id="ghapi-backfill-status" class="text-xs text-slate-500 min-h-[1rem]"></p>
     <ul id="ghapi-recent" class="text-xs text-slate-600 divide-y divide-slate-100"></ul>
@@ -722,16 +726,19 @@ async function ghapiBackfill() {
   const btn = $("ghapi-backfill-btn");
   const statusEl = $("ghapi-backfill-status");
   const daysSel = $("ghapi-backfill-days");
+  const force = $("ghapi-backfill-force").checked;
   const days = Number(daysSel.value) || 30;
   btn.disabled = true;
-  statusEl.textContent = "取込中… (過去 " + days + " 日)";
+  statusEl.textContent = force
+    ? "取込中… (過去 " + days + " 日 強制全件)"
+    : "取込中… (差分 / 最大 " + days + " 日)";
   try {
     const r = await fetch(
       "/api/ghapi/backfill",
       authFetchInit({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ days }),
+        body: JSON.stringify({ days, force }),
       }),
     );
     const j = await r.json().catch(() => ({}));
@@ -739,8 +746,10 @@ async function ghapiBackfill() {
       statusEl.textContent = "取込失敗 (" + r.status + " " + (j.error || "") + ")";
       return;
     }
+    const mode = j.force ? "強制全件" : j.incremental ? "差分" : "全件";
     statusEl.textContent =
-      "取込完了: " + (j.indexed ?? 0) + " 件 (取得 " + (j.fetched ?? 0) + " 点" +
+      "取込完了 [" + mode + " " + (j.days_scanned ?? 0) + "日走査]: " +
+      (j.indexed ?? 0) + " 件 (取得 " + (j.fetched ?? 0) + " 点" +
       (j.errors ? " / エラー " + j.errors + " 日" : "") + ")" +
       (j.first_error ? " — " + j.first_error : "");
     await refreshGhapiStatus().catch(() => {});

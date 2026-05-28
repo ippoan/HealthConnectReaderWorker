@@ -27,6 +27,45 @@ export interface IngestResult {
   indexed: number;
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * backfill で走査する UTC 暦日 (各日の 00:00 UTC の epoch ms) を新しい順に列挙する。
+ *
+ * - `force` または `lastBackfillAt` 無し → 過去 `days` 日 (今日含む) 全件
+ * - それ以外 (差分取込) → `lastBackfillAt` の暦日以降だけ。ただし N 日 window の
+ *   下限を超えて遡らない (= 範囲は [max(today-N+1, lastBackfillDay) .. today])。
+ *
+ * 戻り値は今日 → 過去の順 (新しい順)。1 要素以上を必ず返す。
+ */
+export function backfillDayStarts(
+  now: number,
+  days: number,
+  lastBackfillAt: number | null | undefined,
+  force: boolean,
+): { dayStarts: number[]; incremental: boolean } {
+  const clampedDays = Math.max(1, Math.min(365, Math.floor(days)));
+  const todayMidnight = Math.floor(now / DAY_MS) * DAY_MS;
+  let oldestMidnight = todayMidnight - (clampedDays - 1) * DAY_MS;
+  let incremental = false;
+  if (
+    !force &&
+    typeof lastBackfillAt === "number" &&
+    Number.isFinite(lastBackfillAt)
+  ) {
+    const lastMidnight = Math.floor(lastBackfillAt / DAY_MS) * DAY_MS;
+    if (lastMidnight > oldestMidnight) {
+      oldestMidnight = lastMidnight;
+      incremental = true;
+    }
+  }
+  const dayStarts: number[] = [];
+  for (let d = todayMidnight; d >= oldestMidnight; d -= DAY_MS) {
+    dayStarts.push(d);
+  }
+  return { dayStarts, incremental };
+}
+
 /**
  * 1 つの dataType + intervals の data points を R2/D1 に取り込む。
  * R2 key は `intervals[0]` の UTC 日付で決まるため、呼び出し側は **1 日分ずつ**

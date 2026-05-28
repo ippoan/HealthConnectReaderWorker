@@ -40,13 +40,17 @@ export interface GhapiWebhookPayload {
  *       "metricsSummary": {
  *         "caloriesKcal": 320,
  *         "distanceMillimeters": 5230500,
- *         "averageHeartRateBeatsPerMinute": 152,
- *         "minHeartRateBeatsPerMinute": 110,
- *         "maxHeartRateBeatsPerMinute": 178,
- *         "steps": 5400
+ *         "averageHeartRateBeatsPerMinute": "152",   // int64 は文字列で返る
+ *         "steps": "5400"                            // int64 は文字列で返る
  *       }
  *     }
  *   }
+ *
+ * 注: Google Health API v4 は **int64 系フィールドを protobuf JSON 規約で文字列**
+ * として返す (`steps`, `averageHeartRateBeatsPerMinute` 等)。double 系
+ * (`caloriesKcal`, `distanceMillimeters`) は number。型は両形態を許容し、
+ * 取り出し側 (`ghapiExercisePointToRow`) で tolerant parse する。
+ * min/max 心拍は exercise summary に存在しない (平均 HR のみ)。Refs #65
  */
 export interface GhapiDataPoint {
   name?: string;
@@ -59,12 +63,10 @@ export interface GhapiDataPoint {
     exerciseType?: string;
     displayName?: string;
     metricsSummary?: {
-      caloriesKcal?: number;
-      distanceMillimeters?: number;
-      averageHeartRateBeatsPerMinute?: number;
-      minHeartRateBeatsPerMinute?: number;
-      maxHeartRateBeatsPerMinute?: number;
-      steps?: number;
+      caloriesKcal?: number | string;
+      distanceMillimeters?: number | string;
+      averageHeartRateBeatsPerMinute?: number | string;
+      steps?: number | string;
     };
   };
 }
