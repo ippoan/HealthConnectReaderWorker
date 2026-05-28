@@ -1200,8 +1200,10 @@ app.get("/api/ghapi/workout", apiAuth, async (c) => {
     // raw の細かいサンプルは平均/点が混在して線が荒れる (= 間違った速度に見える)
     // ため使わない。時間 overlap する HC session (de-doubled 済の distance) を返し、
     // チャート側で各 session の avg km/h を平坦線で描く。Refs #60
+    // 手動作成 (source='manual') もこの心拍を基準に作るので速度帯に含める
+    // (= 作成直後に同じ HR ページで重ねて確認できる)。Refs HealthConnectReader#6
     const hcRes = await c.env.DB.prepare(
-      "SELECT id, activity_name, start_at, end_at, distance_m, duration_sec FROM workouts WHERE source = 'hc' AND start_at < ? AND end_at > ? ORDER BY start_at ASC",
+      "SELECT id, activity_name, start_at, end_at, distance_m, duration_sec FROM workouts WHERE source IN ('hc', 'manual') AND start_at < ? AND end_at > ? ORDER BY start_at ASC",
     )
       .bind(winEnd, winStart)
       .all<Record<string, unknown>>();

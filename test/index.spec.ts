@@ -2659,3 +2659,33 @@ describe("GET /ghapi/workout page has 手動作成 link", () => {
     expect(html).toContain("/manual?ghapi=");
   });
 });
+
+describe("GET /api/ghapi/workout includes manual workouts in hc_sessions", () => {
+  it("manual rows overlapping the HR window show up as speed bands", async () => {
+    // ghapi row (基準 HR の workout)
+    await upsertWorkout(env.DB, {
+      id: "ghapi_speedtest01", source: "ghapi", date: "2026-09-01",
+      start_at: "2026-09-01T06:00:00Z", end_at: "2026-09-01T06:40:00Z",
+      activity_name: "RUNNING", distance_m: 6000, duration_sec: 2400,
+      active_calories: null, steps: null, avg_heart_rate: 150,
+      min_heart_rate: null, max_heart_rate: null,
+      raw_key: "ghapi/Exercise/2026/09-01.json", uploaded_at: "2026-09-01T07:00:00Z",
+    });
+    // 同じ時間帯に手動作成した workout (HR window 内)
+    await upsertWorkout(
+      env.DB,
+      manualInputToRow(
+        { startTime: "2026-09-01T06:05:00Z", endTime: "2026-09-01T06:35:00Z", exerciseType: 56, distanceKm: 5 },
+        "manual_cccccccccccccccc", "manual/2026/09-01/manual_cccccccccccccccc.json", "u",
+      ),
+    );
+    const r = await app.request(
+      "/api/ghapi/workout?id=ghapi_speedtest01",
+      { headers: auth() },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { hc_sessions: Array<{ id: string }> };
+    expect(j.hc_sessions.some((w) => w.id === "manual_cccccccccccccccc")).toBe(true);
+  });
+});
