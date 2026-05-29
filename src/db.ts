@@ -601,6 +601,18 @@ export async function deleteWorkout(
 }
 
 /**
+ * その date の source='hc' 行を全削除する。`/api/upload?force=true` (snapshot
+ * replace) で、incoming payload から消えた session (= 別アプリ由来の stale 行) を
+ * 一掃するために使う。idempotent。Refs #97
+ */
+export async function deleteHcRowsForDate(db: D1Database, date: string): Promise<void> {
+  await db
+    .prepare("DELETE FROM workouts WHERE source = 'hc' AND date = ?")
+    .bind(date)
+    .run();
+}
+
+/**
  * D1 から手動作成 (source='manual') workouts を新しい順に取得する。
  * `/api/manual` の一覧表示 + 削除 UI 用。
  */

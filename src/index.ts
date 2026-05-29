@@ -21,6 +21,7 @@ import { apiAuth, verifyAuthCookie } from "./auth";
 import {
   addManualPair,
   buildManualPayload,
+  deleteHcRowsForDate,
   deleteWorkout,
   groupAndMatch,
   hcPayloadToRows,
@@ -210,23 +211,37 @@ app.post("/api/upload", apiAuth, async (c) => {
   // 上書きすると既存セッションを消してしまうので、upload-batch と同じ
   // merge セマンティクスで既存と incoming を id 単位で union する。
   // Refs ippoan/HealthConnectReaderWorker#18
-  const existing = await c.env.R2.get(key);
+  // `?force=true` = snapshot replace: merge せず incoming で R2 を丸ごと上書きし、
+  // その日の hc 行を削除してから再 index する。Android app は full-day snapshot を
+  // 送るため、フィルタ前の旧 upload が残した別 source (Fitbit / Google Fit) の
+  // レコードが merge で復活し距離集計 (source 間 max) を汚す問題を、再 upload で
+  // self-heal できるようにする。既定 (force 無し) は従来の id 単位 union merge
+  // (Refs #18 / #97)。
+  const force = c.req.query("force") === "true";
   let toStore: ArrayBuffer | string = raw;
   let storedPayload: Record<string, unknown> = parsed as Record<string, unknown>;
-  if (existing !== null) {
-    let existingPayload: unknown = null;
-    try { existingPayload = JSON.parse(await existing.text()); } catch { /* corrupt → overwrite */ }
-    if (existingPayload !== null) {
-      const merged = mergeHcPayloads(existingPayload, parsed as Record<string, unknown>);
-      storedPayload = merged;
-      toStore = JSON.stringify(merged);
+  // force 時は既存を読まず incoming で丸ごと上書き (= snapshot replace)。
+  // 既定は既存と id 単位 union merge。
+  if (!force) {
+    const existing = await c.env.R2.get(key);
+    if (existing !== null) {
+      let existingPayload: unknown = null;
+      try { existingPayload = JSON.parse(await existing.text()); } catch { /* corrupt → overwrite */ }
+      if (existingPayload !== null) {
+        const merged = mergeHcPayloads(existingPayload, parsed as Record<string, unknown>);
+        storedPayload = merged;
+        toStore = JSON.stringify(merged);
+      }
     }
   }
   await c.env.R2.put(key, toStore, {
     httpMetadata: { contentType: "application/json" },
   });
+  // force 時は、payload から消えた session (別 source) の stale 行を消すため、
+  // 再 index の前にその日の hc 行を一掃する。
+  if (force) await deleteHcRowsForDate(c.env.DB, date);
   const indexed = await indexHcPayload(c.env.DB, storedPayload, key, date);
-  return c.json({ ok: true, key, date, indexed });
+  return c.json({ ok: true, key, date, indexed, force });
 });
 
 /**
