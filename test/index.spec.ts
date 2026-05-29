@@ -2658,6 +2658,12 @@ describe("GET /ghapi/workout page has 手動作成 link", () => {
     expect(html).toContain("手動作成");
     expect(html).toContain("/manual?ghapi=");
   });
+  it("has a de-spike toggle (default on)", async () => {
+    const r = await app.request("/ghapi/workout?id=ghapi_x", { headers: auth() }, env);
+    const html = await r.text();
+    expect(html).toContain('id="despike-toggle"');
+    expect(html).toContain("心拍スパイク除去");
+  });
 });
 
 describe("GET /api/ghapi/workout includes manual workouts in hc_sessions", () => {
