@@ -1827,6 +1827,13 @@ function despikeHr(samples) {
   return out;
 }
 
+// "#rrggbb" + alpha → "rgba(r,g,b,a)"。速度帯の半透明塗り用。
+function hexA(hex, a) {
+  var h = String(hex).replace("#", "");
+  var r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return "rgba(" + r + "," + g + "," + b + "," + a + ")";
+}
+
 // 速度 (speed) 軸の max を「**表示中** (凡例 ON) の speed 系列の最大 ×1.25」で
 // 設定する。凡例で最大速度の系列を消したら、残った系列に合わせて軸が縮み
 // マージンが取り直される (= 固定ではなくフィルター後最大に追従)。min は 0 固定。
@@ -1900,10 +1907,13 @@ function renderSingle(j) {
       label: (w.activity_name || "speed") + " " + v.toFixed(1) + "km/h",
       data: [{ x: s, y: v }, { x: e, y: v }],
       yAxisID: "speed",
+      // 比較ビュー (id2) と同じ「半透明の塗り速度帯」スタイルに揃える。
       borderColor: SPEED_COLORS[i % SPEED_COLORS.length],
-      borderWidth: 3,
+      backgroundColor: hexA(SPEED_COLORS[i % SPEED_COLORS.length], 0.2),
+      borderWidth: 2.5,
+      borderCapStyle: "round",
       pointRadius: 0,
-      fill: false,
+      fill: true,
     });
   });
   // 速度軸を 0 始まり + 上方向に余白 (×1.25, 最低 1) で固定する。速度帯が
