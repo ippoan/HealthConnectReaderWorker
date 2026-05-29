@@ -1620,6 +1620,10 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
       <h2 id="chart-title" class="font-semibold">心拍 + 速度</h2>
       <button id="export-json" type="button" class="hidden px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-[11px] shrink-0">JSON ↓</button>
     </div>
+    <label class="flex items-center gap-1.5 text-[12px] text-slate-600">
+      <input id="despike-toggle" type="checkbox" checked class="accent-emerald-600" />
+      心拍スパイク除去 (単発ノイズを平滑化)
+    </label>
     <p id="chart-help-single" class="text-[10px] text-slate-400">
       赤 = 心拍 (Fitbit, 右軸 bpm)。色帯 = 各 HC session の平均速度 (左軸 km/h) を
       期間で平坦表示。速度区間の境界で心拍が上下するかを確認できる。速度は HC、
@@ -1649,6 +1653,7 @@ export const GHAPI_DETAIL_HTML = `<!doctype html>
 const params = new URLSearchParams(location.search);
 const id = params.get("id") || "";
 const id2 = params.get("id2") || "";
+var currentChart = null; // 再描画 (デスパイクトグル) 時に破棄するため保持
 function authHeaders() {
   try {
     if (window.HC && typeof window.HC.getUploadToken === "function") {
@@ -1798,6 +1803,30 @@ function hrAxisBounds(samples) {
   return { min: Math.max(0, Math.floor((lo - 8) / 5) * 5), max: Math.ceil((hi + 8) / 5) * 5 };
 }
 
+// 心拍スパイク除去トグル (既定 ON)。チェックが無ければ ON 扱い。
+function despikeEnabled() {
+  var el = document.getElementById("despike-toggle");
+  return el ? el.checked : true;
+}
+
+// 単発スパイク (1 サンプルだけ前後平均から ±18bpm 以上跳ね、前後どうしは近い)
+// を前後の中央値で置換する軽いデスパイク。光学式 HR の瞬間ノイズを均す。
+// トグル OFF 時はそのまま返す。長さは変えず値だけ補正する。
+// Refs ippoan/HealthConnectReader#6
+function despikeHr(samples) {
+  if (!despikeEnabled() || !samples || samples.length < 3) return samples;
+  var out = samples.slice();
+  for (var i = 1; i < samples.length - 1; i++) {
+    var prev = samples[i - 1].bpm, cur = samples[i].bpm, next = samples[i + 1].bpm;
+    if (typeof prev !== "number" || typeof cur !== "number" || typeof next !== "number") continue;
+    var nb = (prev + next) / 2;
+    if (Math.abs(cur - nb) >= 18 && Math.abs(prev - next) < 15) {
+      out[i] = { t: samples[i].t, bpm: Math.round(nb) };
+    }
+  }
+  return out;
+}
+
 // 速度 (speed) 軸の max を「**表示中** (凡例 ON) の speed 系列の最大 ×1.25」で
 // 設定する。凡例で最大速度の系列を消したら、残った系列に合わせて軸が縮み
 // マージンが取り直される (= 固定ではなくフィルター後最大に追従)。min は 0 固定。
@@ -1814,9 +1843,12 @@ function applySpeedMax(chart) {
 }
 
 function renderSingle(j) {
+  window.__single = j; window.__cmp = null; // トグル再描画用に保持
+  if (currentChart) { currentChart.destroy(); currentChart = null; }
   const summaryEl = document.getElementById("summary");
   const row = j.row || {};
-  const samples = Array.isArray(j.samples) ? j.samples : [];
+  const rawSamples = Array.isArray(j.samples) ? j.samples : [];
+  const samples = despikeHr(rawSamples); // スパイク除去 (トグル ON 時)
   document.getElementById("raw-dump").textContent = JSON.stringify(j, null, 2);
 
   const startMs = row.start_at ? Date.parse(row.start_at) : null;
@@ -1917,6 +1949,7 @@ function renderSingle(j) {
       },
     },
   });
+  currentChart = chart;
   applySpeedMax(chart);
   chart.update("none");
 
@@ -1929,6 +1962,8 @@ function renderSingle(j) {
 
 // 2 件の workout を「開始からの経過 (分)」で揃えて重ねる比較ビュー。
 function renderCompare(jA, jB) {
+  window.__cmp = { jA: jA, jB: jB }; window.__single = null; // トグル再描画用
+  if (currentChart) { currentChart.destroy(); currentChart = null; }
   document.getElementById("page-title").textContent = "Google Health 比較";
   document.getElementById("chart-title").textContent = "心拍 比較";
   document.getElementById("chart-help-single").classList.add("hidden");
@@ -1938,8 +1973,8 @@ function renderCompare(jA, jB) {
   clear.href = "/ghapi/workout?id=" + encodeURIComponent(id);
 
   const rowA = jA.row || {}, rowB = jB.row || {};
-  const samplesA = Array.isArray(jA.samples) ? jA.samples : [];
-  const samplesB = Array.isArray(jB.samples) ? jB.samples : [];
+  const samplesA = despikeHr(Array.isArray(jA.samples) ? jA.samples : []);
+  const samplesB = despikeHr(Array.isArray(jB.samples) ? jB.samples : []);
   document.getElementById("raw-dump").textContent = JSON.stringify({ A: jA, B: jB }, null, 2);
 
   const startA = rowA.start_at ? Date.parse(rowA.start_at) : null;
@@ -2077,6 +2112,7 @@ function renderCompare(jA, jB) {
       },
     },
   });
+  currentChart = chart;
 
   // 表示中の系列だけで x 軸の min/max を引き直す。非表示系列・隠れた side の
   // duration は範囲に含めない。B 側は現在のオフセットを考慮する。
@@ -2151,12 +2187,23 @@ function setupOffset(chart, bIdx, sliderMin, sliderMax, onApply) {
   document.getElementById("offset-reset").addEventListener("click", function () { range.value = "0"; apply(0); });
 }
 
+// デスパイクトグル切替時、再 fetch せず保持データから描き直す。
+function wireDespikeToggle() {
+  var el = document.getElementById("despike-toggle");
+  if (!el) return;
+  el.addEventListener("change", function () {
+    if (window.__cmp) renderCompare(window.__cmp.jA, window.__cmp.jB);
+    else if (window.__single) renderSingle(window.__single);
+  });
+}
+
 async function load() {
   const summaryEl = document.getElementById("summary");
   if (!id) { summaryEl.textContent = "id がありません"; return; }
   // この心拍 (ghapi) を基準に手動作成ページを開くリンク。
   var toManual = document.getElementById("to-manual");
   if (toManual) toManual.href = "/manual?ghapi=" + encodeURIComponent(id);
+  wireDespikeToggle();
   populateCompare();
   if (id2) {
     let jA, jB;
