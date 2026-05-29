@@ -124,6 +124,10 @@ export const INDEX_HTML = `<!doctype html>
       class="w-full bg-slate-700 text-white font-semibold py-3 rounded-xl active:bg-slate-800">
       過去 30 日を Upload
     </button>
+    <button id="upload-force-btn"
+      class="w-full bg-amber-600 text-white font-semibold py-3 rounded-xl active:bg-amber-700">
+      強制アップロード（今日・上書き）
+    </button>
     <label class="flex items-center justify-between text-sm">
       <span>1日1回 自動 Upload</span>
       <input id="auto-toggle" type="checkbox" class="h-5 w-9" />
@@ -307,20 +311,23 @@ async function refreshZonesList() {
     .join("");
 }
 
-async function uploadNow() {
+async function uploadNow(force) {
   if (!hasNative) { setStatus("native bridge 不在 (browser preview)"); return; }
   setStatus("読取中…");
   let payload;
   try { payload = window.HC.readToday(); } catch (e) { setStatus("読取失敗: " + e); return; }
-  setStatus("送信中…");
-  const r = await fetch("/api/upload", authFetchInit({
+  // force=true は merge せず上書き + その日の hc 行を入れ直す (= 別 source の
+  // 古いレコードを一掃)。通常 upload は既存と merge。
+  setStatus(force ? "上書き送信中…" : "送信中…");
+  const url = force ? "/api/upload?force=true" : "/api/upload";
+  const r = await fetch(url, authFetchInit({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: payload,
   }));
   if (!r.ok) { setStatus("upload 失敗: " + r.status); return; }
   const j = await r.json();
-  setStatus("✓ uploaded " + j.date);
+  setStatus((force ? "✓ 上書き uploaded " : "✓ uploaded ") + j.date);
   refreshHistory();
 }
 
@@ -821,8 +828,9 @@ async function ghapiBackfill() {
 
 document.addEventListener("DOMContentLoaded", () => {
   $("env-badge").textContent = hasNative ? "native bridge: ✓" : "PWA / preview";
-  $("upload-btn").addEventListener("click", uploadNow);
+  $("upload-btn").addEventListener("click", () => uploadNow(false));
   $("upload-30-btn").addEventListener("click", uploadPast30);
+  $("upload-force-btn").addEventListener("click", () => uploadNow(true));
   $("auto-toggle").addEventListener("change", (e) => {
     if (!hasNative) return;
     if (e.target.checked) window.HC.scheduleDailyUpload();

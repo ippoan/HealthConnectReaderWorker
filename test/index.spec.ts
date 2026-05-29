@@ -185,6 +185,66 @@ describe("POST /api/upload", () => {
     expect(ids).toContain("2026-10-10T19:00:00Z");
   });
 
+  it("/api/upload?force=true overwrites R2 and replaces hc rows for the date (Refs #97)", async () => {
+    // 既存: フィルタ前の旧 upload が入れた別 source (Fitbit) の session/distance が
+    // R2 と D1 に残っている状態を仕込む。
+    const key = "hc/2026/07-15.json";
+    await env.R2.put(key, JSON.stringify({
+      date: "2026-07-15",
+      sessions: [
+        { startTime: "2026-07-15T01:00:00Z", endTime: "2026-07-15T02:00:00Z", exerciseType: 0, source: "com.fitbit.FitbitMobile" },
+      ],
+      distances: [
+        { startTime: "2026-07-15T01:00:00Z", endTime: "2026-07-15T02:00:00Z", km: 9.9, source: "com.fitbit.FitbitMobile" },
+      ],
+      speeds: [],
+    }));
+    await upsertWorkout(env.DB, {
+      id: "hc_stale_fitbit", source: "hc", date: "2026-07-15",
+      start_at: "2026-07-15T01:00:00Z", end_at: "2026-07-15T02:00:00Z",
+      activity_name: "exercise_0", distance_m: 9900, duration_sec: 3600,
+      active_calories: null, steps: null, avg_heart_rate: null, min_heart_rate: null, max_heart_rate: null,
+      raw_key: key, uploaded_at: "2026-07-15T03:00:00Z",
+    } as WorkoutRow);
+
+    // incoming: Life Fitness のみ (Android app のフィルタ済み snapshot を模す)
+    const incoming = {
+      date: "2026-07-15",
+      sessions: [
+        { startTime: "2026-07-15T01:00:00Z", endTime: "2026-07-15T02:00:00Z", exerciseType: 57, title: "トレッドミル", source: "com.lifefitness.connect" },
+      ],
+      distances: [
+        { startTime: "2026-07-15T01:00:00Z", endTime: "2026-07-15T02:00:00Z", km: 3.004, source: "com.lifefitness.connect" },
+      ],
+      speeds: [],
+    };
+    const r = await app.request(
+      "/api/upload?force=true",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(incoming),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    expect((await r.json() as { force: boolean }).force).toBe(true);
+
+    // R2: merge されず incoming のみで上書きされている
+    const stored = JSON.parse(await (await env.R2.get(key))!.text());
+    expect(stored.sessions.length).toBe(1);
+    expect(stored.sessions[0].source).toBe("com.lifefitness.connect");
+    expect(stored.distances.length).toBe(1);
+    expect(stored.distances[0].km).toBe(3.004);
+
+    // D1: stale な Fitbit 行が消え、Life Fitness 1 セッションのみ。距離は 3004m
+    // (Fitbit の 9900 を source 間 max で拾っていない)。
+    const hcRows = (await listWorkouts(env.DB, { source: "hc", limit: 200 })).filter((w) => w.date === "2026-07-15");
+    expect(hcRows.length).toBe(1);
+    expect(hcRows.some((w) => w.id === "hc_stale_fitbit")).toBe(false);
+    expect(hcRows[0].distance_m).toBe(3004);
+  });
+
   it("uses payload.date for the R2 key (JST 朝の前日書込を防ぐ, Refs #48)", async () => {
     // Android が JST `LocalDate.now()` で生成した `date` field を最優先する。
     // UTC 朝でも payload.date="2026-05-27" なら hc/2026/05-27.json に書かれる
