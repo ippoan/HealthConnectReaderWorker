@@ -28,6 +28,8 @@ jobs:
       install_command: 'npm install'
       typecheck_command: 'npx tsc --noEmit'
       has_tests: true
+      # @ippoan/mcp-cf-workers (GitHub Packages) の install に必要
+      npm_scope: '@ippoan'
       # single-env: staging deploy と release deploy は同じ root config を叩く。
       # D1 schema 適用は **Worker 自身の `POST /_admin/migrate`** に任せる
       # (CI token に D1:Edit を足さなくて済むため。Refs #11)。
