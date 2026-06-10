@@ -2676,6 +2676,120 @@ describe("GET /api/manual + POST /api/manual/delete", () => {
   });
 });
 
+// HC 自動 upload (source='hc') が手動データ (source='manual') に一切干渉しない
+// ことの担保。merge / force=true (snapshot replace) / upload-batch の 3 経路
+// すべてで manual の D1 行と R2 blob が byte 単位で不変であること。Refs #84
+describe("HC auto upload does not interfere with manual data (Refs #84)", () => {
+  const manualBody = {
+    startTime: "2026-08-20T06:00:00Z",
+    endTime: "2026-08-20T06:30:00Z",
+    exerciseType: 56,
+    title: "手動ラン",
+    distanceKm: 5,
+  };
+  // manual と完全に同時刻・同 exerciseType の HC session (= 最悪ケースの衝突候補)
+  const hcIncoming = {
+    date: "2026-08-20",
+    sessions: [
+      { startTime: "2026-08-20T06:00:00Z", endTime: "2026-08-20T06:30:00Z", exerciseType: 56, source: "com.lifefitness.connect" },
+    ],
+    distances: [
+      { startTime: "2026-08-20T06:00:00Z", endTime: "2026-08-20T06:30:00Z", km: 3.1, source: "com.lifefitness.connect" },
+    ],
+    speeds: [],
+  };
+
+  async function createManual(): Promise<{ id: string; key: string; blob: string }> {
+    const r = await app.request(
+      "/api/manual",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(manualBody),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { id: string; key: string };
+    const blob = await (await env.R2.get(j.key))!.text();
+    return { ...j, blob };
+  }
+
+  async function assertManualIntact(m: { id: string; key: string; blob: string }) {
+    // R2: manual blob が byte 単位で不変
+    const obj = await env.R2.get(m.key);
+    expect(obj).not.toBeNull();
+    expect(await obj!.text()).toBe(m.blob);
+    // D1: manual 行が値ごと不変
+    const row = (await listManualFromDb(env.DB)).find((w) => w.id === m.id);
+    expect(row).toBeDefined();
+    expect(row!.source).toBe("manual");
+    expect(row!.distance_m).toBe(5000);
+    expect(row!.duration_sec).toBe(1800);
+    expect(row!.activity_name).toBe("手動ラン");
+  }
+
+  it("normal /api/upload (merge) leaves manual row + R2 blob intact", async () => {
+    const m = await createManual();
+    const r = await app.request(
+      "/api/upload",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(hcIncoming),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    await assertManualIntact(m);
+    // HC 側は別 row として共存 (manual と同時刻でも上書きしない)
+    const hcRows = (await listWorkouts(env.DB, { source: "hc", limit: 500 }))
+      .filter((w) => w.date === "2026-08-20");
+    expect(hcRows.length).toBe(1);
+    expect(hcRows[0].id).toMatch(/^hc_/);
+    expect(hcRows[0].distance_m).toBe(3100);
+  });
+
+  it("/api/upload?force=true (hc snapshot replace) does not delete manual rows of the same date", async () => {
+    const m = await createManual();
+    // force=true は deleteHcRowsForDate で同日の hc 行を一掃するが、
+    // manual はその範囲外であること。
+    const r = await app.request(
+      "/api/upload?force=true",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify(hcIncoming),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { force: boolean }).force).toBe(true);
+    await assertManualIntact(m);
+  });
+
+  it("/api/upload-batch leaves manual row + R2 blob intact", async () => {
+    const m = await createManual();
+    const r = await app.request(
+      "/api/upload-batch?force=true",
+      {
+        method: "POST",
+        headers: { ...auth(), "Content-Type": "application/json" },
+        body: JSON.stringify({ days: [{ date: "2026-08-20", payload: hcIncoming }] }),
+      },
+      env,
+    );
+    expect(r.status).toBe(200);
+    await assertManualIntact(m);
+    // 後始末: 他テストの workouts 集計に影響しないよう hc/manual を削除
+    await app.request(
+      "/api/manual/delete",
+      { method: "POST", headers: { ...auth(), "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id }) },
+      env,
+    );
+  });
+});
+
 describe("deleteWorkout / listManualFromDb helpers", () => {
   it("deleteWorkout removes a row by (source,id)", async () => {
     await upsertWorkout(

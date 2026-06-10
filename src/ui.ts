@@ -248,7 +248,22 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 
-function setStatus(msg) { $("status").textContent = msg; }
+// warn=true で amber (HC partial 読取失敗等の警告)、false で通常の slate に戻す。
+function setStatus(msg, warn) {
+  const el = $("status");
+  el.textContent = msg;
+  el.classList.toggle("text-amber-600", !!warn);
+  el.classList.toggle("text-slate-600", !warn);
+}
+
+// HC payload (JSON 文字列) の top-level readErrors から失敗 section 名を抜く。
+// per-type try-catch (HealthConnectReader#16) で partial 読取された場合に
+// { readErrors: { sessions: "SecurityException: ...", ... } } が入る。
+// parse 不能 / readErrors 無しは [] (= 警告なし)。Refs #29
+function readErrorSections(parsed) {
+  if (!parsed || typeof parsed !== "object" || !parsed.readErrors) return [];
+  return Object.keys(parsed.readErrors);
+}
 function setZonesStatus(msg) { $("zones-status").textContent = msg; }
 
 // PWA は auth-worker JWT cookie で API が叩ける (= credentials: 'include')。
@@ -316,6 +331,10 @@ async function uploadNow(force) {
   setStatus("読取中…");
   let payload;
   try { payload = window.HC.readToday(); } catch (e) { setStatus("読取失敗: " + e); return; }
+  // partial 読取 (readErrors) の検出。parse 失敗はここでは無視する
+  // (サーバ側 validation に任せ、upload 自体は従来どおり試みる)。Refs #29
+  let failedSections = [];
+  try { failedSections = readErrorSections(JSON.parse(payload)); } catch {}
   // force=true は merge せず上書き + その日の hc 行を入れ直す (= 別 source の
   // 古いレコードを一掃)。通常 upload は既存と merge。
   setStatus(force ? "上書き送信中…" : "送信中…");
@@ -327,7 +346,12 @@ async function uploadNow(force) {
   }));
   if (!r.ok) { setStatus("upload 失敗: " + r.status); return; }
   const j = await r.json();
-  setStatus((force ? "✓ 上書き uploaded " : "✓ uploaded ") + j.date);
+  const base = (force ? "✓ 上書き uploaded " : "✓ uploaded ") + j.date;
+  if (failedSections.length) {
+    setStatus(base + " (⚠ HC 読取失敗: " + failedSections.join(", ") + ")", true);
+  } else {
+    setStatus(base);
+  }
   refreshHistory();
 }
 
@@ -340,12 +364,15 @@ async function uploadPast30() {
   let batch;
   try { batch = window.HC.readPastDays(30); } catch (e) { setStatus("読取失敗: " + e); return; }
   // bridge が error JSON (= { error, message } shape) を返したら detect (Refs #5)
+  let failedSections = [];
   try {
     const peek = JSON.parse(batch);
     if (peek && peek.error) {
       setStatus("bridge err: " + peek.error + " / " + (peek.message || "").slice(0, 120));
       return;
     }
+    // readPastDaysJson も top-level readErrors を持つ (Refs #29)
+    failedSections = readErrorSections(peek);
   } catch {
     setStatus("bridge JSON parse 失敗: " + (batch || "").slice(0, 120));
     return;
@@ -362,7 +389,11 @@ async function uploadPast30() {
     return;
   }
   const j = await r.json();
-  setStatus("✓ " + j.written + " 日分 upload");
+  if (failedSections.length) {
+    setStatus("✓ " + j.written + " 日分 upload (⚠ HC 読取失敗: " + failedSections.join(", ") + ")", true);
+  } else {
+    setStatus("✓ " + j.written + " 日分 upload");
+  }
   refreshHistory();
 }
 
