@@ -9,7 +9,12 @@
  *
  * Refs ippoan/HealthConnectReaderWorker#15
  */
-import { verifyHs256Jwt, type Hs256BaseClaims } from "@ippoan/mcp-cf-workers/auth";
+// barrel (./auth) は jose 依存の cf-access / mcp-jwt を re-export するため、
+// jose を持たない本 repo は subpath export を直接 import する。
+import {
+  verifyHs256Jwt,
+  type Hs256BaseClaims,
+} from "@ippoan/mcp-cf-workers/auth/hs256-jwt";
 
 export interface JwtPayload {
   exp?: number;

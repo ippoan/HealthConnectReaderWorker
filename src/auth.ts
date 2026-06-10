@@ -1,6 +1,6 @@
 import type { Context, MiddlewareHandler } from "hono";
 
-import { timingSafeEqual } from "@ippoan/mcp-cf-workers/auth";
+import { timingSafeEqual } from "@ippoan/mcp-cf-workers/auth/crypto";
 
 import {
   ALLOWED_EMAILS,
