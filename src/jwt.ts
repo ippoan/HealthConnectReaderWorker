@@ -1,10 +1,20 @@
 /**
  * auth-worker (auth.ippoan.org) が発行する HS256 JWT を検証する。
- * 実装は `ippoan/auth-worker/src/lib/jwt.ts` と等価 (sync で維持する)。
+ * 検証本体は `@ippoan/mcp-cf-workers` の `./auth` export (`verifyHs256Jwt`) を
+ * 消費する — 旧来の「auth-worker/src/lib/jwt.ts と等価 (sync で維持する)」
+ * 手動コピーを解消 (Refs ippoan/mcp-cf-workers#46)。
  * `JWT_SECRET` は auth-worker と物理的に同じ値を Workers secret で持つ。
+ *
+ * 本 repo の契約 (null-on-fail / exp 必須 / skew なし) は wrapper で維持する。
  *
  * Refs ippoan/HealthConnectReaderWorker#15
  */
+// barrel (./auth) は jose 依存の cf-access / mcp-jwt を re-export するため、
+// jose を持たない本 repo は subpath export を直接 import する。
+import {
+  verifyHs256Jwt,
+  type Hs256BaseClaims,
+} from "@ippoan/mcp-cf-workers/auth/hs256-jwt";
 
 export interface JwtPayload {
   exp?: number;
@@ -20,35 +30,15 @@ export async function verifyJwt(
   token: string,
   secret: string,
 ): Promise<JwtPayload | null> {
-  if (!secret) return null;
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const headerB64 = parts[0]!;
-  const payloadB64 = parts[1]!;
-  const signatureB64 = parts[2]!;
-
-  let header: { alg?: string };
   try {
-    header = JSON.parse(base64UrlDecode(headerB64));
+    // clockToleranceSec: 0 — 旧ローカル実装は skew なしで exp を判定していた
+    // ため、認可 window を広げない (lib default は 30s)。
+    return await verifyHs256Jwt<Hs256BaseClaims>(token, secret, {
+      clockToleranceSec: 0,
+    });
   } catch {
     return null;
   }
-  if (header.alg !== "HS256") return null;
-
-  const expected = await hmacSign(`${headerB64}.${payloadB64}`, secret);
-  if (!constantTimeEqual(signatureB64, expected)) return null;
-
-  let payload: JwtPayload;
-  try {
-    payload = JSON.parse(base64UrlDecode(payloadB64)) as JwtPayload;
-  } catch {
-    return null;
-  }
-
-  if (typeof payload.exp !== "number") return null;
-  if (payload.exp <= Math.floor(Date.now() / 1000)) return null;
-
-  return payload;
 }
 
 /**
@@ -59,39 +49,4 @@ export async function verifyJwt(
 export function getAuthCookieFromHeader(cookieHeader: string): string | null {
   const m = /logi_auth_token=([^;]+)/.exec(cookieHeader);
   return m?.[1] ?? null;
-}
-
-async function hmacSign(data: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(data),
-  );
-  return base64UrlEncodeBytes(new Uint8Array(signature));
-}
-
-function base64UrlEncodeBytes(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64UrlDecode(data: string): string {
-  const base64 = data.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-  return atob(padded);
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }

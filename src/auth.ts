@@ -1,5 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 
+import { timingSafeEqual } from "@ippoan/mcp-cf-workers/auth/crypto";
+
 import {
   ALLOWED_EMAILS,
   readJwtSecret,
@@ -28,10 +30,11 @@ export const apiAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const expected = await readUploadToken(c.env);
   if (!expected) return c.json({ error: "server_misconfigured" }, 500);
 
-  // (a) Bearer header
+  // (a) Bearer header — lib の timingSafeEqual は HMAC 固定長化で長さも秘匿する
+  // (旧ローカル実装は長さ不一致の早期 return で微リークがあった)。
   const header = c.req.header("authorization") ?? "";
   const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (m && timingSafeEqual(m[1], expected)) {
+  if (m && (await timingSafeEqual(m[1]!, expected))) {
     return next();
   }
 
@@ -64,13 +67,6 @@ export async function verifyAuthCookie(
   if (!payload) return false;
   const email = typeof payload.email === "string" ? payload.email : "";
   return (ALLOWED_EMAILS as readonly string[]).includes(email);
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }
 
 export type _Ctx = Context<AppEnv>;
